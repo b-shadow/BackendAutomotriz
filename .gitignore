@@ -1,0 +1,81 @@
+# Environment
+.env
+.env.local
+.env.*.local
+venv/
+virtualenv/
+ENV/
+env/
+.venv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Django
+*.log
+db.sqlite3
+db.sqlite3-journal
+/media/
+/staticfiles/
+/static/
+/var/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Node (npm - no debería estar en backend, pero por si acaso)
+node_modules/
+package-lock.json
+package.json
+
+# OS
+Thumbs.db
+.DS_Store
+*.swp
+*~
+
+# Test & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Misc
+*.backup
+*.bak
+*.tmp
+*.pid
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Misc
+*.pid
+.directory
+Thumbs.db

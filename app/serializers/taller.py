@@ -1,11 +1,8 @@
 """ Serializers base para modelos del taller automotriz.
 Estructura:
 - Serializers relacionados con vehículos y planes
-- Serializers para catálogos y espacios
-- Serializers para citas y presupuestos
-- Serializers para órdenes de trabajo
-- Serializers para inventario
-- Serializers para pagos y facturas"""
+- Serializers para catálogos
+- Serializers para citas"""
 
 from rest_framework import serializers
 from django.utils import timezone

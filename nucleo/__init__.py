@@ -1,1 +1,1 @@
-# Nucleo package (código compartido)
+"""Paquete nucleo."""

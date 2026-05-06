@@ -49,7 +49,14 @@ THIRD_PARTY_APPS = [
 ]
 
 LOCAL_APPS = [
+    # Legacy temporal: contiene AUTH_USER_MODEL y migraciones historicas.
+    # Se retirara cuando los modelos esten 100% movidos a modulos/.
     "app",
+    "modulos.administracion_acceso_configuracion",
+    "modulos.vehiculos_servicios_plan_citas",
+    "modulos.atencion_tecnica_ejecucion",
+    "modulos.inventario_proveedores_administracion",
+    "modulos.comunicacion_control_inteligencia",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -133,7 +140,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # === AUTHENTICATION ===
-AUTH_USER_MODEL = "app.Usuario"  # Usuario como AUTH_USER_MODEL oficial
+AUTH_USER_MODEL = "administracion_acceso_configuracion.Usuario"
 
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",

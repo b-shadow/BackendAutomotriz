@@ -1,5 +1,5 @@
-"""
-URLs raíz del proyecto SaaS Backend.
+﻿"""
+URLs raÃ­z del proyecto SaaS Backend.
 
 Estructura de rutas:
 - /api/tenants/resolve/ - Resolver tenant por slug (global)
@@ -25,9 +25,10 @@ from drf_spectacular.views import (
     SpectacularSwaggerView,
     SpectacularRedocView,
 )
-from app.viewsets import EmpresaViewSet, PlanViewSet
-from app.viewsets.pagos import PagoViewSet
-from app.viewsets.tenant_auth import (
+from modulos.administracion_acceso_configuracion.viewsets import (
+    EmpresaViewSet,
+    PlanViewSet,
+    PagoViewSet,
     resolve_tenant,
     tenant_register,
     tenant_login,
@@ -57,7 +58,7 @@ urlpatterns = [
         name="redoc",
     ),
     
-    # ========== AUTENTICACIÓN MULTI-TENANT ==========
+    # ========== AUTENTICACIÃ“N MULTI-TENANT ==========
     # Resolver tenant por slug
     path("api/tenants/resolve/", resolve_tenant, name="resolve_tenant"),
     
@@ -82,10 +83,27 @@ urlpatterns = [
     # Endpoints globales (no requieren tenant)
     path("api/", include(global_router.urls)),
     
-    # ========== ENDPOINTS POR TENANT ==========
-    # Rutas dinámicas por tenant: /api/<empresa_slug>/usuarios/, etc
-    # Ejemplo: /api/empresa-demo/usuarios/
-    path("api/<slug:empresa_slug>/", include("app.urls")),
+    # ========== ENDPOINTS MODULARES POR TENANT ==========
+    path(
+        "api/<slug:empresa_slug>/administracion/",
+        include("modulos.administracion_acceso_configuracion.urls"),
+    ),
+    path(
+        "api/<slug:empresa_slug>/vehiculos-servicios/",
+        include("modulos.vehiculos_servicios_plan_citas.urls"),
+    ),
+    path(
+        "api/<slug:empresa_slug>/atencion-tecnica/",
+        include("modulos.atencion_tecnica_ejecucion.urls"),
+    ),
+    path(
+        "api/<slug:empresa_slug>/gestion-administrativa/",
+        include("modulos.inventario_proveedores_administracion.urls"),
+    ),
+    path(
+        "api/<slug:empresa_slug>/comunicacion-control/",
+        include("modulos.comunicacion_control_inteligencia.urls"),
+    ),
 ]
 
 # Static & Media files (solo en desarrollo)

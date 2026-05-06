@@ -1,4 +1,4 @@
-"""Middleware para detectar la empresa desde la URL.
+﻿"""Middleware para detectar la empresa desde la URL.
 Extrae el slug de empresa del path y lo inyecta en el request.
 Ejemplos de URLs:
 - /api/empresa-demo/usuarios/login/
@@ -6,7 +6,7 @@ Ejemplos de URLs:
 - /api/acme/dashboard/"""
 from django.http import JsonResponse
 from django.utils.deprecation import MiddlewareMixin
-from app.models import Empresa
+from modulos.administracion_acceso_configuracion.models import Empresa
 
 
 class TenantMiddleware(MiddlewareMixin):
@@ -23,7 +23,7 @@ class TenantMiddleware(MiddlewareMixin):
             "/api/schema/",
             "/api/redoc/",
             "/api/auth/",       
-            "/api/tenants/",    # Autenticación por tenant (global)
+            "/api/tenants/",    # AutenticaciÃ³n por tenant (global)
             "/api/pagos/",      # Pagos (global)
             "/api/planes/",     # Planes (global)
             "/api/empresas/",   # Empresas (global)
@@ -39,7 +39,7 @@ class TenantMiddleware(MiddlewareMixin):
             request.tenant = None
             return None
         empresa_slug = path_parts[1]
-        # BÚSQUEDA DE EMPRESA
+        # BÃšSQUEDA DE EMPRESA
         try:
             empresa = Empresa.objects.select_related().get(
                 slug=empresa_slug,
@@ -49,10 +49,10 @@ class TenantMiddleware(MiddlewareMixin):
             request.tenant_id = str(empresa.id)
             
         except Empresa.DoesNotExist:
-            # Empresa no existe o está inactiva
+            # Empresa no existe o estÃ¡ inactiva
             return JsonResponse(
                 {
-                    "detail": f"Empresa '{empresa_slug}' no encontrada o está inactiva",
+                    "detail": f"Empresa '{empresa_slug}' no encontrada o estÃ¡ inactiva",
                     "code": "tenant_not_found"
                 },
                 status=404
@@ -66,3 +66,4 @@ class TenantMiddleware(MiddlewareMixin):
                 status=500
             )
         return None
+

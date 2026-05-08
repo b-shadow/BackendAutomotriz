@@ -7,6 +7,7 @@ Ejemplos de URLs:
 from django.http import JsonResponse
 from django.utils.deprecation import MiddlewareMixin
 from modulos.administracion_acceso_configuracion.models import Empresa
+from modulos.comunicacion_control_inteligencia.services.backups import BackupService
 
 
 class TenantMiddleware(MiddlewareMixin):
@@ -47,6 +48,12 @@ class TenantMiddleware(MiddlewareMixin):
             )
             request.tenant = empresa
             request.tenant_id = str(empresa.id)
+            try:
+                # Ejecuta backups automáticos pendientes (incluye compensación por caída)
+                BackupService.run_due_backups_for_empresa(empresa)
+            except Exception:
+                # No bloquear request operativo por fallas de backup
+                pass
             
         except Empresa.DoesNotExist:
             # Empresa no existe o estÃ¡ inactiva

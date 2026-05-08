@@ -12,8 +12,19 @@ from rest_framework import serializers
 from django.utils import timezone
 from django.db import transaction
 from modulos.atencion_tecnica_ejecucion.models import RecepcionVehiculo, NivelCombustible
-from modulos.vehiculos_servicios_plan_citas.models import Cita, EstadoCita
+from modulos.atencion_tecnica_ejecucion.models import (
+    PresupuestoCita,
+    PresupuestoDetalle,
+    EstadoPresupuestoCita,
+    EstadoPresupuestoDetalle,
+    AvanceVehiculo,
+    TipoAvanceVehiculo,
+)
+from modulos.vehiculos_servicios_plan_citas.models import Cita, EstadoCita, CitaEspacioSegmento
 from modulos.administracion_acceso_configuracion.models import Usuario, Empresa
+from modulos.vehiculos_servicios_plan_citas.services.citas_programacion_service import CitasProgramacionService
+from modulos.vehiculos_servicios_plan_citas.services.bloques_tiempo import BLOQUE_MINUTOS
+from modulos.atencion_tecnica_ejecucion.services.ordenes_trabajo import OrdenTrabajoService
 
 
 class RecepcionVehiculoSerializer(serializers.ModelSerializer):
@@ -30,6 +41,7 @@ class RecepcionVehiculoSerializer(serializers.ModelSerializer):
         source="asesor_registra.nombres",
         read_only=True
     )
+    recogido_por_nombre = serializers.CharField(source="recogido_por.nombres", read_only=True)
 
     class Meta:
         model = RecepcionVehiculo
@@ -47,6 +59,9 @@ class RecepcionVehiculoSerializer(serializers.ModelSerializer):
             "kilometraje_ingreso",
             "nivel_combustible",
             "observaciones",
+            "fecha_recogida",
+            "recogido_por",
+            "recogido_por_nombre",
             "created_at",
             "updated_at",
         ]
@@ -86,7 +101,7 @@ class RecepcionVehiculoCreacionSerializer(serializers.ModelSerializer):
     """
     Serializer para crear RecepcionVehiculo.
     Valida:
-    - Cita existe y estÃ¡ PROGRAMADA
+    - Cita existe y estÃ¡ PROGRAMADA/EN_ESPERA_INGRESO
     - Campos requeridos completos
     - Cambia estado de cita a EN_PROCESO
     """
@@ -102,7 +117,7 @@ class RecepcionVehiculoCreacionSerializer(serializers.ModelSerializer):
         ]
 
     def validate_cita_id(self, value):
-        """Valida que cita existe, estÃ¡ PROGRAMADA y usuario tiene permiso."""
+        """Valida que cita existe, estÃ¡ PROGRAMADA/EN_ESPERA_INGRESO y usuario tiene permiso."""
         request = self.context.get("request")
         empresa_id = self.context.get("empresa_id")
 
@@ -114,9 +129,9 @@ class RecepcionVehiculoCreacionSerializer(serializers.ModelSerializer):
             )
 
         # Validar estado de cita
-        if cita.estado != EstadoCita.PROGRAMADA:
+        if cita.estado not in [EstadoCita.PROGRAMADA, EstadoCita.EN_ESPERA_INGRESO]:
             raise serializers.ValidationError(
-                f"La cita debe estar en estado PROGRAMADA. "
+                f"La cita debe estar en estado PROGRAMADA o EN_ESPERA_INGRESO. "
                 f"Estado actual: {cita.get_estado_display()}"
             )
 
@@ -136,6 +151,55 @@ class RecepcionVehiculoCreacionSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def _normalizar_duracion_a_bloques(self, duracion_min):
+        if duracion_min <= 0:
+            return 0
+        residuo = duracion_min % BLOQUE_MINUTOS
+        if residuo == 0:
+            return duracion_min
+        return duracion_min + (BLOQUE_MINUTOS - residuo)
+
+    def _recalcular_programacion_desde_llegada(self, cita, empresa_id, llegada_real_at):
+        primer_segmento = cita.espacios_segmentos.order_by("orden_segmento").first()
+        if not primer_segmento or not primer_segmento.espacio_trabajo_id:
+            return
+
+        duracion_servicios = sum((d.tiempo_estandar_min or 0) for d in cita.detalles.all())
+        duracion_requerida = duracion_servicios if duracion_servicios > 0 else (cita.duracion_estimada_min or 0)
+        duracion_requerida = self._normalizar_duracion_a_bloques(duracion_requerida)
+        if duracion_requerida <= 0:
+            return
+
+        resultado = CitasProgramacionService.encontrar_primer_inicio_disponible(
+            espacio_id=str(primer_segmento.espacio_trabajo_id),
+            fecha_hora_inicio=llegada_real_at,
+            duracion_requerida_min=duracion_requerida,
+            empresa=cita.empresa,
+        )
+        if not resultado:
+            raise serializers.ValidationError(
+                "No se encontro disponibilidad para recalcular la cita desde la hora de llegada."
+            )
+
+        for segmento in cita.espacios_segmentos.all():
+            segmento.delete()
+
+        for orden, seg in enumerate(resultado["segmentos"], 1):
+            CitaEspacioSegmento.objects.create(
+                empresa_id=empresa_id,
+                cita=cita,
+                espacio_trabajo=primer_segmento.espacio_trabajo,
+                orden_segmento=orden,
+                tipo_segmento=getattr(primer_segmento, "tipo_segmento", "TALLER") or "TALLER",
+                inicio_programado=seg["inicio_dt"],
+                fin_programado=seg["fin_dt"],
+                motivo="Recalculado automaticamente al registrar recepcion",
+            )
+
+        cita.fecha_hora_inicio_programada = resultado["inicio_dt"]
+        cita.fecha_hora_fin_programada = resultado["fin_dt"]
+        cita.duracion_estimada_min = duracion_requerida
+
     @transaction.atomic
     def create(self, validated_data):
         """
@@ -148,6 +212,14 @@ class RecepcionVehiculoCreacionSerializer(serializers.ModelSerializer):
         # Obtener cita nuevamente (validada)
         cita = Cita.objects.get(id=cita_id, empresa_id=empresa_id)
 
+        llegada_real = timezone.now()
+
+        self._recalcular_programacion_desde_llegada(
+            cita=cita,
+            empresa_id=empresa_id,
+            llegada_real_at=llegada_real,
+        )
+
         # Crear recepciÃ³n
         recepcion = RecepcionVehiculo.objects.create(
             empresa_id=empresa_id,
@@ -158,8 +230,66 @@ class RecepcionVehiculoCreacionSerializer(serializers.ModelSerializer):
 
         # Cambiar estado de cita a EN_PROCESO
         cita.estado = EstadoCita.EN_PROCESO
-        cita.llegada_real_at = timezone.now()
-        cita.save(update_fields=["estado", "llegada_real_at", "updated_at"])
+        cita.llegada_real_at = llegada_real
+        cita.save(update_fields=[
+            "estado",
+            "llegada_real_at",
+            "fecha_hora_inicio_programada",
+            "fecha_hora_fin_programada",
+            "duracion_estimada_min",
+            "updated_at",
+        ])
+
+        # CU-23: al recepcionar, generar OT automaticamente en estado ABIERTA.
+        OrdenTrabajoService.crear_orden_automatica(
+            empresa=cita.empresa,
+            cita=cita,
+            asesor_responsable=request.user,
+            observaciones="OT generada automaticamente al registrar recepcion.",
+        )
+
+        # CU-22: al recepcionar, generar presupuesto BORRADOR automaticamente si no existe.
+        if not hasattr(cita, "presupuesto"):
+            presupuesto = PresupuestoCita.objects.create(
+                empresa=cita.empresa,
+                cita=cita,
+                estado=EstadoPresupuestoCita.BORRADOR,
+                subtotal=0,
+                descuento=0,
+                total=0,
+                observaciones="Presupuesto generado automáticamente al registrar recepción.",
+            )
+            subtotal = 0
+            for cdet in cita.detalles.all().order_by("orden_visual", "created_at"):
+                precio = cdet.precio_referencial or 0
+                PresupuestoDetalle.objects.create(
+                    empresa=cita.empresa,
+                    presupuesto=presupuesto,
+                    servicio_catalogo=cdet.servicio_catalogo,
+                    descripcion=(cdet.servicio_catalogo.nombre if cdet.servicio_catalogo else "Servicio"),
+                    cantidad=1,
+                    tiempo_estandar_min=cdet.tiempo_estandar_min or 0,
+                    precio_unitario=precio,
+                    subtotal=precio,
+                    estado=EstadoPresupuestoDetalle.ACTIVO,
+                )
+                subtotal += precio
+            presupuesto.subtotal = subtotal
+            presupuesto.total = subtotal
+            presupuesto.save(update_fields=["subtotal", "total", "updated_at"])
+
+        # Publicar avance base para vista cliente/admin (sin depender de publicación manual).
+        AvanceVehiculo.objects.create(
+            empresa=cita.empresa,
+            cita=cita,
+            orden_detalle=None,
+            registrado_por=request.user,
+            tipo=TipoAvanceVehiculo.GENERAL,
+            estado_nuevo="EN TALLER",
+            mensaje="Vehiculo recepcionado, en espera de inicio de trabajos.",
+            porcentaje_avance=0,
+            visible_cliente=True,
+        )
 
         return recepcion
 
@@ -194,6 +324,7 @@ class RecepcionVehiculoDetalleSerializer(serializers.ModelSerializer):
         source="asesor_registra.email",
         read_only=True
     )
+    recogido_por_nombre = serializers.CharField(source="recogido_por.nombres", read_only=True)
 
     class Meta:
         model = RecepcionVehiculo
@@ -218,6 +349,8 @@ class RecepcionVehiculoDetalleSerializer(serializers.ModelSerializer):
             "nivel_combustible",
             "condicion_general",
             "observaciones",
+            "fecha_recogida",
+            "recogido_por_nombre",
             # Asesor
             "asesor_nombre",
             "asesor_email",
@@ -286,6 +419,8 @@ class RecepcionVehiculoListaSerializer(serializers.ModelSerializer):
         source="asesor_registra.nombres",
         read_only=True
     )
+    recogido = serializers.SerializerMethodField()
+    recogido_por_nombre = serializers.CharField(source="recogido_por.nombres", read_only=True)
 
     class Meta:
         model = RecepcionVehiculo
@@ -298,6 +433,9 @@ class RecepcionVehiculoListaSerializer(serializers.ModelSerializer):
             "kilometraje_ingreso",
             "nivel_combustible",
             "asesor_nombre",
+            "fecha_recogida",
+            "recogido",
+            "recogido_por_nombre",
         ]
         read_only_fields = fields
 
@@ -305,6 +443,9 @@ class RecepcionVehiculoListaSerializer(serializers.ModelSerializer):
         if obj.cita.vehiculo and obj.cita.vehiculo.propietario:
             return obj.cita.vehiculo.propietario.nombres
         return None
+
+    def get_recogido(self, obj):
+        return bool(obj.fecha_recogida)
 
 
 class RecepcionVehiculoActualizacionSerializer(serializers.ModelSerializer):

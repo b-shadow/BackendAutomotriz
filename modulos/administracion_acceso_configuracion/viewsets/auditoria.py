@@ -72,7 +72,7 @@ class AuditoriaViewSet(viewsets.ReadOnlyModelViewSet):
         # Todos los eventos
         total = queryset.count()
         # Eventos de hoy
-        ahora = timezone.now()
+        ahora = timezone.localtime(timezone.now())
         inicio_hoy = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
         fin_hoy = inicio_hoy + timedelta(days=1)
         eventos_hoy = queryset.filter(created_at__gte=inicio_hoy, created_at__lt=fin_hoy).count()

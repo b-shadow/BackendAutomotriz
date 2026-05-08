@@ -1,9 +1,15 @@
 ﻿"""
 Punto de entrada modular para rutas de comunicacion/control/inteligencia.
-
-Aun sin viewsets publicados en esta fase.
 """
 
-from django.urls import path
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
 
-urlpatterns = []
+from modulos.comunicacion_control_inteligencia.viewsets import BackupEmpresaViewSet
+
+router = DefaultRouter()
+router.register(r"backups", BackupEmpresaViewSet, basename="backup-empresa")
+
+urlpatterns = [
+    path("", include(router.urls)),
+]

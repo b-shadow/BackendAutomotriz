@@ -499,6 +499,20 @@ class RecepcionVehiculo(models.Model):
         null=True,
         help_text="Notas adicionales sobre la recepción"
     )
+    fecha_recogida = models.DateTimeField(
+        _("fecha de recogida"),
+        null=True,
+        blank=True,
+        help_text="Fecha/hora cuando el cliente recogió el vehículo",
+    )
+    recogido_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recepciones_recogidas",
+        verbose_name=_("recogido por"),
+    )
     created_at = models.DateTimeField(_("creado en"), auto_now_add=True)
     updated_at = models.DateTimeField(_("actualizado en"), auto_now=True)
 
@@ -599,6 +613,5 @@ class AvanceVehiculo(models.Model):
 
     def __str__(self):
         return f"Avance {self.cita.id} - {self.estado_nuevo}"
-
 
 

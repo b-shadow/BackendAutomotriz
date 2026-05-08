@@ -5,6 +5,10 @@ from modulos.vehiculos_servicios_plan_citas.models import (
     HorarioEspacioTrabajo,
     EspacioTrabajo,
 )
+from modulos.vehiculos_servicios_plan_citas.services.bloques_tiempo import (
+    es_bloque_valido,
+    time_a_minutos,
+)
 
 
 # ============================================================================
@@ -177,6 +181,16 @@ class HorarioEspacioTrabajoCreacionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"hora_fin": "La hora de fin debe ser mayor que la hora de inicio."}
             )
+
+        # Validar alineación a bloques de 30 minutos
+        if hora_inicio and not es_bloque_valido(time_a_minutos(hora_inicio)):
+            raise serializers.ValidationError(
+                {"hora_inicio": "La hora de inicio debe alinearse a bloques de 30 minutos."}
+            )
+        if hora_fin and not es_bloque_valido(time_a_minutos(hora_fin)):
+            raise serializers.ValidationError(
+                {"hora_fin": "La hora de fin debe alinearse a bloques de 30 minutos."}
+            )
         
         # Validar solapamiento con otros horarios activos del mismo espacio
         if dia_semana is not None and hora_inicio and hora_fin:
@@ -273,6 +287,16 @@ class HorarioEspacioTrabajoEdicionSerializer(serializers.ModelSerializer):
         if hora_inicio and hora_fin and hora_inicio >= hora_fin:
             raise serializers.ValidationError(
                 {"hora_fin": "La hora de fin debe ser mayor que la hora de inicio."}
+            )
+
+        # Validar alineación a bloques de 30 minutos
+        if hora_inicio and not es_bloque_valido(time_a_minutos(hora_inicio)):
+            raise serializers.ValidationError(
+                {"hora_inicio": "La hora de inicio debe alinearse a bloques de 30 minutos."}
+            )
+        if hora_fin and not es_bloque_valido(time_a_minutos(hora_fin)):
+            raise serializers.ValidationError(
+                {"hora_fin": "La hora de fin debe alinearse a bloques de 30 minutos."}
             )
         
         # Validar solapamiento solo si el horario estarÃ¡ activo
@@ -394,6 +418,38 @@ class HorarioEspacioTrabajoActivoSerializer(serializers.ModelSerializer):
         # El motivo se usa en auditorÃ­a, no se guarda en el modelo
         self.validated_data.pop('motivo', None)
         return super().save(**kwargs)
+
+
+class HorarioEspacioBloquesSerializer(serializers.Serializer):
+    """
+    Serializer para actualizar horarios por bloques de 30 min en un día específico.
+    Reemplaza completamente los horarios de ese día para un espacio.
+    """
+    dia_semana = serializers.IntegerField(required=True)
+    bloques_inicio_min = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=True,
+        allow_empty=True,
+    )
+
+    def validate_dia_semana(self, value):
+        if value < 0 or value > 6:
+            raise serializers.ValidationError("El día de la semana debe estar entre 0 y 6.")
+        return value
+
+    def validate_bloques_inicio_min(self, value):
+        unicos = []
+        vistos = set()
+        for minuto in value:
+            if minuto in vistos:
+                continue
+            if not es_bloque_valido(minuto):
+                raise serializers.ValidationError(
+                    "Cada bloque debe estar entre 00:00 y 23:30 y ser múltiplo de 30 minutos."
+                )
+            vistos.add(minuto)
+            unicos.append(minuto)
+        return sorted(unicos)
 
 
 class EspacioTrabajoListadoSerializer(serializers.ModelSerializer):

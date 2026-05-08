@@ -1,7 +1,7 @@
-"""
-Punto de entrada modular para comunicacion/control/inteligencia.
-
-Sin viewsets activos aun en esta fase.
+﻿"""
+Punto de entrada modular para viewsets de comunicacion/control/inteligencia.
 """
 
-__all__ = []
+from modulos.comunicacion_control_inteligencia.viewsets.backups import BackupEmpresaViewSet
+
+__all__ = ["BackupEmpresaViewSet"]

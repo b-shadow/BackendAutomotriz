@@ -1,4 +1,4 @@
-﻿"""Serializers para Inteligencia Artificial."""
+"""Serializers para Inteligencia Artificial."""
 
 from rest_framework import serializers
 from modulos.comunicacion_control_inteligencia.models import (
@@ -27,7 +27,7 @@ class ConversacionIASerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "empresa", "usuario", "estado", "canal", "created_at", "updated_at"]
 
 
 class MensajeIASerializer(serializers.ModelSerializer):

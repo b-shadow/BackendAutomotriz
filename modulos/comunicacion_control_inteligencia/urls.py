@@ -1,5 +1,9 @@
+"""
+Punto de entrada modular para rutas de comunicacion/control/inteligencia.
+"""
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+
 from modulos.comunicacion_control_inteligencia.viewsets.ia_viewsets import IAViewSet
 
 router = DefaultRouter()

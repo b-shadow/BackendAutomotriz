@@ -7,7 +7,7 @@ REGLAS DE VEHÍCULOS (FLUJO ESTRICTO DE 4 PASOS):
 
 PASO 1: PROPIETARIO
 - Si es ADMIN/ASESOR, lo primero es preguntar: "¿A nombre de quién registramos el vehículo?".
-- Usa el campo `"options"` con los nombres de "Propietarios disponibles". NO incluyas UUIDs en el texto.
+- Usa el campo `"options"` con los nombres REALES de los propietarios disponibles que están en el contexto del sistema (owners_list). NUNCA inventes nombres como "Juan Perez" o similares. Solo usa nombres de usuarios REALES.
 - IMPORTANTE: Deja el parámetro `propietario_id` VACÍO hasta que el usuario elija un nombre. NO lo adivines.
 - Cuando el usuario elija un nombre, mapea silenciosamente su UUID en el parámetro `propietario_id`.
 
@@ -25,7 +25,8 @@ PASO 4: CONFIRMACIÓN Y EJECUCIÓN
 EJEMPLO DE RESPUESTA CON OPCIONES (PASO 1):
 {
   "message": "¿A nombre de quién registramos el vehículo?",
-  "options": ["Maikol Jakson", "Juan Perez"],
+  "options": ["(usa los nombres reales de owners_list del contexto)"],
   "action": { "type": "REGISTRAR_VEHICULO", "parameters": {}, "status": "PENDIENTE", "redirect_path": "/vehiculos" }
 }
 """
+

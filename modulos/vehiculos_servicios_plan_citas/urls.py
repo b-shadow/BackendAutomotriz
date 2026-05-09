@@ -7,6 +7,7 @@ from modulos.vehiculos_servicios_plan_citas.viewsets import (
     EspaciosTrabajoViewSet,
     PlanesVehiculoViewSet,
     CitasViewSet,
+    ReportesViewSet,
 )
 
 app_name = "vehiculos_servicios_plan_citas"
@@ -17,6 +18,7 @@ router.register(r"servicios", ServiciosCatalogoViewSet, basename="servicio-catal
 router.register(r"espacios", EspaciosTrabajoViewSet, basename="espacio-trabajo")
 router.register(r"planes-vehiculo", PlanesVehiculoViewSet, basename="plan-vehiculo")
 router.register(r"citas", CitasViewSet, basename="cita")
+router.register(r"reportes", ReportesViewSet, basename="reportes")
 
 urlpatterns = [
     path("", include(router.urls)),

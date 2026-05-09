@@ -276,6 +276,7 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
     REQUIRED_FIELDS = []  # No requerimos campos adicionales en creaciÃ³n
 
     class Meta:
+        app_label = "app"
         db_table = "usuarios"
         ordering = ["-created_at"]
         verbose_name = _("Usuario")

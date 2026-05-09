@@ -140,7 +140,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # === AUTHENTICATION ===
-AUTH_USER_MODEL = "administracion_acceso_configuracion.Usuario"
+AUTH_USER_MODEL = "app.Usuario"
 
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",

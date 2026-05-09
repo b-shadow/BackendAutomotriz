@@ -29,7 +29,7 @@ from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
-from django.db import transaction
+from django.db import transaction, OperationalError
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +411,6 @@ class PlanesVehiculoViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="crear-detalle")
-    @transaction.atomic
     def crear_detalle(self, request, pk=None, empresa_slug=None):
         """
         Agregar un nuevo detalle al plan.
@@ -439,46 +438,53 @@ class PlanesVehiculoViewSet(viewsets.ModelViewSet):
         El frontend NO debe enviar: origen, tiempo_estandar_min, precio_referencial
         (estos valores se determinan automÃ¡ticamente en el backend)
         """
-        plan = self.get_object()
-        
-        # Preparar datos para serializer
-        data = request.data.copy()
-        data["plan_servicio_id"] = plan.id
-        
-        serializer = PlanServicioDetalleCreacionSerializer(
-            data=data,
-            context=self.get_serializer_context()
-        )
-        serializer.is_valid(raise_exception=True)
-        detalle = serializer.save()
-        
-        # Registrar auditorÃ­a
-        registrar_evento_desde_request(
-            request=request,
-            empresa=request.tenant,
-            accion=AccionAuditoria.PLAN_VEHICULO_DETALLE_CREADO,
-            usuario=request.user,
-            entidad_tipo="PlanServicioDetalle",
-            entidad_id=detalle.id,
-            descripcion=f"Detalle agregado al plan de {plan.vehiculo.placa}",
-            metadata={
-                "plan_id": str(plan.id),
-                "vehiculo_placa": plan.vehiculo.placa,
-                "servicio": detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else "S/C",
-                "origen": detalle.origen,
-                "prioridad": detalle.prioridad,
-                "estado": detalle.estado,
-            }
-        )
-        
-        response_serializer = PlanServicioDetalleListadoSerializer(detalle)
-        return Response(
-            {
-                "mensaje": f"Detalle agregado como {detalle.origen.lower()} exitosamente",
-                "detalle": response_serializer.data
-            },
-            status=status.HTTP_201_CREATED
-        )
+        for attempt in range(2):
+            try:
+                with transaction.atomic():
+                    plan = self.get_object()
+
+                    # Preparar datos para serializer
+                    data = request.data.copy()
+                    data["plan_servicio_id"] = plan.id
+
+                    serializer = PlanServicioDetalleCreacionSerializer(
+                        data=data,
+                        context=self.get_serializer_context()
+                    )
+                    serializer.is_valid(raise_exception=True)
+                    detalle = serializer.save()
+
+                    # Registrar auditorÃ­a
+                    registrar_evento_desde_request(
+                        request=request,
+                        empresa=request.tenant,
+                        accion=AccionAuditoria.PLAN_VEHICULO_DETALLE_CREADO,
+                        usuario=request.user,
+                        entidad_tipo="PlanServicioDetalle",
+                        entidad_id=detalle.id,
+                        descripcion=f"Detalle agregado al plan de {plan.vehiculo.placa}",
+                        metadata={
+                            "plan_id": str(plan.id),
+                            "vehiculo_placa": plan.vehiculo.placa,
+                            "servicio": detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else "S/C",
+                            "origen": detalle.origen,
+                            "prioridad": detalle.prioridad,
+                            "estado": detalle.estado,
+                        }
+                    )
+
+                    response_serializer = PlanServicioDetalleListadoSerializer(detalle)
+                    return Response(
+                        {
+                            "mensaje": f"Detalle agregado como {detalle.origen.lower()} exitosamente",
+                            "detalle": response_serializer.data
+                        },
+                        status=status.HTTP_201_CREATED
+                    )
+            except OperationalError as exc:
+                if "deadlock detected" in str(exc).lower() and attempt == 0:
+                    continue
+                raise
 
     @action(detail=False, methods=["patch"], url_path="detalles/(P<detalle_id>[^/.]+)/editar")
     @transaction.atomic

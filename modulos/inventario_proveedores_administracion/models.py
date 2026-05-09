@@ -566,6 +566,23 @@ class SolicitudRepuestoDetalle(models.Model):
         _("cantidad entregada"),
         default=0,
     )
+    cantidad_recibida_taller = models.IntegerField(
+        _("cantidad recibida en taller"),
+        default=0,
+    )
+    recibido_taller_at = models.DateTimeField(
+        _("recibido en taller en"),
+        null=True,
+        blank=True,
+    )
+    recibido_taller_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="solicitudes_repuesto_recibidas_taller",
+        verbose_name=_("recibido en taller por"),
+    )
     estado = models.CharField(
         _("estado"),
         max_length=20,
@@ -988,5 +1005,4 @@ class MovimientoCaja(models.Model):
 
     def __str__(self):
         return f"{self.tipo} - ${self.monto}"
-
 

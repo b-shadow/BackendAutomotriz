@@ -58,6 +58,10 @@ from modulos.comunicacion_control_inteligencia.models import (
     AccionIA,
     ReporteGenerado,
 )
+from modulos.vehiculos_servicios_plan_citas.services.bloques_tiempo import (
+    BLOQUE_MINUTOS,
+    es_bloque_valido,
+)
 
 
 # ============================================================================
@@ -771,6 +775,10 @@ class PlanServicioDetalleCreacionSerializer(serializers.ModelSerializer):
             data["_estado_asignado"] = EstadoPlanServicioDetalle.PENDIENTE
         
         # Obtener tiempo y precio del servicio catÃ¡logo
+        if servicio.tiempo_estandar_min < BLOQUE_MINUTOS or servicio.tiempo_estandar_min % BLOQUE_MINUTOS != 0:
+            raise serializers.ValidationError(
+                {"servicio_catalogo_id": "El servicio seleccionado no estÃ¡ configurado en bloques de 30 minutos."}
+            )
         data["_tiempo_desde_catalogo"] = servicio.tiempo_estandar_min
         data["_precio_desde_catalogo"] = servicio.precio_base
         
@@ -846,6 +854,16 @@ class PlanServicioDetalleEdicionSerializer(serializers.ModelSerializer):
             "precio_referencial",
             "observaciones",
         ]
+
+    def validate_tiempo_estandar_min(self, value):
+        """Validar que el tiempo estÃ¡ndar sea mÃºltiplo de 30 min."""
+        if value < BLOQUE_MINUTOS:
+            raise serializers.ValidationError("La duraciÃ³n mÃ­nima es 30 minutos.")
+        if value % BLOQUE_MINUTOS != 0:
+            raise serializers.ValidationError(
+                "La duraciÃ³n debe seleccionarse en bloques de 30 minutos."
+            )
+        return value
 
 
 class PlanServicioDetalleEstadoSerializer(serializers.ModelSerializer):
@@ -1140,10 +1158,12 @@ class ServicioCatalogoCreacionSerializer(serializers.ModelSerializer):
         return value
     
     def validate_tiempo_estandar_min(self, value):
-        """Validar que el tiempo estÃ¡ndar sea positivo."""
-        if value <= 0:
+        """Validar que el tiempo estÃ¡ndar sea mÃºltiplo de 30 min."""
+        if value < BLOQUE_MINUTOS:
+            raise serializers.ValidationError("La duraciÃ³n mÃ­nima es 30 minutos.")
+        if value % BLOQUE_MINUTOS != 0:
             raise serializers.ValidationError(
-                "El tiempo estÃ¡ndar debe ser mayor que 0 minutos."
+                "La duraciÃ³n debe seleccionarse en bloques de 30 minutos."
             )
         return value
     
@@ -1217,10 +1237,12 @@ class ServicioCatalogoEdicionSerializer(serializers.ModelSerializer):
         return value
     
     def validate_tiempo_estandar_min(self, value):
-        """Validar que el tiempo estÃ¡ndar sea positivo."""
-        if value <= 0:
+        """Validar que el tiempo estÃ¡ndar sea mÃºltiplo de 30 min."""
+        if value < BLOQUE_MINUTOS:
+            raise serializers.ValidationError("La duraciÃ³n mÃ­nima es 30 minutos.")
+        if value % BLOQUE_MINUTOS != 0:
             raise serializers.ValidationError(
-                "El tiempo estÃ¡ndar debe ser mayor que 0 minutos."
+                "La duraciÃ³n debe seleccionarse en bloques de 30 minutos."
             )
         return value
     
@@ -1702,12 +1724,24 @@ class CitaCreacionSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"fecha_hora_inicio_programada": error_temp}
             )
+
+        # Inicio debe estar alineado a bloques de 30 minutos
+        inicio = data["fecha_hora_inicio_programada"]
+        inicio_minutos = inicio.hour * 60 + inicio.minute
+        if not es_bloque_valido(inicio_minutos):
+            raise serializers.ValidationError(
+                {
+                    "fecha_hora_inicio_programada": (
+                        "La hora de inicio debe alinearse a bloques de 30 minutos."
+                    )
+                }
+            )
         
         # ========== CÃLCULO DE DURACIÃ“N MÃNIMA ==========
         
         # Sumar tiempos estÃ¡ndar de todos los servicios
         duracion_minima = sum(
-            s.servicio_catalogo.tiempo_estandar_min 
+            s.tiempo_estandar_min
             for s in servicios
         )
         
@@ -1716,6 +1750,15 @@ class CitaCreacionSerializer(serializers.Serializer):
                 {
                     "servicios_plan_detalle_ids": 
                     "Los servicios seleccionados no tienen duraciÃ³n estÃ¡ndar definida."
+                }
+            )
+
+        if duracion_minima % BLOQUE_MINUTOS != 0:
+            raise serializers.ValidationError(
+                {
+                    "servicios_plan_detalle_ids": (
+                        "La duraciÃ³n total debe ser mÃºltiplo de 30 minutos."
+                    )
                 }
             )
         
@@ -2055,6 +2098,12 @@ class CitaPreviewIntencionSerializer(serializers.Serializer):
         valido, error = CitasProgramacionService.validar_inicio_no_pasado(value, empresa)
         if not valido:
             raise serializers.ValidationError(error)
+
+        inicio_minutos = value.hour * 60 + value.minute
+        if not es_bloque_valido(inicio_minutos):
+            raise serializers.ValidationError(
+                "La hora de inicio debe alinearse a bloques de 30 minutos."
+            )
         
         return value
     
@@ -2110,6 +2159,10 @@ class CitaPreviewIntencionSerializer(serializers.Serializer):
         if duracion_total_min <= 0:
             raise serializers.ValidationError(
                 "La duraciÃ³n total de los servicios debe ser mayor que 0 minutos."
+            )
+        if duracion_total_min % BLOQUE_MINUTOS != 0:
+            raise serializers.ValidationError(
+                "La duraciÃ³n total debe ser mÃºltiplo de 30 minutos."
             )
         
         # Usar CitasProgramacionService para calcular tentativamente
@@ -2179,6 +2232,7 @@ class CitaPreviewIntencionSerializer(serializers.Serializer):
         for i, seg in enumerate(resultado.segmentos, 1):
             segmentos_preview.append({
                 "numero": i,
+                "espacio_id": str(espacio_trabajo.id),
                 "espacio": espacio_trabajo.nombre,
                 "inicio": seg["inicio_dt"].isoformat(),
                 "fin": seg["fin_dt"].isoformat(),
@@ -2193,6 +2247,8 @@ class CitaPreviewIntencionSerializer(serializers.Serializer):
         data["_segmentos_preview"] = segmentos_preview
         data["_mensajes"] = mensajes
         data["_es_valida"] = resultado.valido
+        data["_espacio_trabajo_id"] = str(espacio_trabajo.id)
+        data["_espacio_trabajo_nombre"] = espacio_trabajo.nombre
         
         return data
     
@@ -2209,6 +2265,8 @@ class CitaPreviewIntencionSerializer(serializers.Serializer):
         fragmentado = validated_data.get("_fragmentado", False)
         segmentos_preview = validated_data.get("_segmentos_preview", [])
         mensajes = validated_data.get("_mensajes", [])
+        espacio_trabajo_id = validated_data.get("_espacio_trabajo_id")
+        espacio_trabajo_nombre = validated_data.get("_espacio_trabajo_nombre")
         
         # Retornar dict para serializaciÃ³n
         return {
@@ -2219,6 +2277,8 @@ class CitaPreviewIntencionSerializer(serializers.Serializer):
             "fragmentado": fragmentado,
             "segmentos_preview": segmentos_preview,
             "mensajes": mensajes,
+            "espacio_trabajo_id": espacio_trabajo_id,
+            "espacio_trabajo_nombre": espacio_trabajo_nombre,
         }
 
 
@@ -2436,5 +2496,3 @@ class MarcarVehiculoDevueltoSerializer(serializers.Serializer):
         allow_null=True,
         help_text="Fecha y hora de devoluciÃ³n (opcional, default: ahora)"
     )
-
-

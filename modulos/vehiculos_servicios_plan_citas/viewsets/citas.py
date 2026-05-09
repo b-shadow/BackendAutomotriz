@@ -19,6 +19,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
 from django.db import transaction
 from django.utils import timezone
+from django.db.models import Q
 
 from modulos.vehiculos_servicios_plan_citas.models import (
     Cita,
@@ -31,6 +32,7 @@ from modulos.vehiculos_servicios_plan_citas.models import (
     EstadoCita,
     EstadoPlanServicioDetalle,
     EspacioTrabajo,
+    HorarioEspacioTrabajo,
 )
 from modulos.vehiculos_servicios_plan_citas.serializers.taller import (
     CitaListadoSerializer,
@@ -44,6 +46,7 @@ from modulos.vehiculos_servicios_plan_citas.serializers.taller import (
     CitaPreviewIntencionSerializer,
     validar_conflictos_espacios_en_bd,
 )
+from modulos.vehiculos_servicios_plan_citas.services import CitasProgramacionService
 from modulos.administracion_acceso_configuracion.services.auditoria_service import (
     registrar_evento_desde_request,
     registrar_evento_on_commit,
@@ -195,15 +198,21 @@ class CitasViewSet(viewsets.ModelViewSet):
     ordering_fields = ["fecha_hora_inicio_programada", "estado", "created_at"]
     ordering = ["-fecha_hora_inicio_programada"]
     filterset_fields = ["estado", "cliente", "vehiculo", "canal_origen"]
+    NO_SHOW_TOLERANCIA_MIN = 15
 
     def get_permissions(self):
         """Aplicar permisos especÃ­ficos segÃºn la acciÃ³n."""
         if self.action == "list" or self.action == "retrieve":
             # Listar y ver: IsAuthenticatedTenant + PuedeVerCita (object-level)
             return [IsAuthenticatedTenant(), PuedeVerCita()]
-        elif self.action in ["create", "update", "partial_update"]:
+        elif self.action in ["create", "update", "partial_update", "marcar_no_show"]:
             # Crear y editar: IsAuthenticatedTenant + PuedeGestionarCitas
             return [IsAuthenticatedTenant(), PuedeGestionarCitas()]
+        elif self.action == "bloques_disponibles":
+            # Consulta operativa para creación de citas
+            return [IsAuthenticatedTenant(), PuedeGestionarCitas()]
+        elif self.action == "agenda":
+            return [IsAuthenticatedTenant(), PuedeVerCita()]
         elif self.action == "destroy":
             # Destroy bloqueado (ver mÃ©todo override)
             return [IsAuthenticatedTenant()]
@@ -324,7 +333,6 @@ class CitasViewSet(viewsets.ModelViewSet):
         6. Espacios y segmentos son vÃ¡lidos (calculados por backend)
         7. No hay solapamiento de espacios
         """
-        from modulos.vehiculos_servicios_plan_citas.services.citas_programacion_service import CitasProgramacionService
         
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -409,6 +417,41 @@ class CitasViewSet(viewsets.ModelViewSet):
                     fin_programado=segmento_canonico["fin_dt"],
                     motivo=f"Fragmento de reserva {'(fragmentado)' if fragmentado else ''}",
                 )
+
+            # CU22: presupuesto automático al crear cita.
+            from decimal import Decimal
+            from modulos.atencion_tecnica_ejecucion.models import (
+                PresupuestoCita,
+                PresupuestoDetalle,
+                EstadoPresupuestoCita,
+                EstadoPresupuestoDetalle,
+            )
+
+            presupuesto = PresupuestoCita.objects.create(
+                empresa=self.request.tenant,
+                cita=cita,
+                estado=EstadoPresupuestoCita.BORRADOR,
+                descuento=Decimal("0.00"),
+                observaciones="Generado automáticamente al crear la cita.",
+            )
+            subtotal_pres = Decimal("0.00")
+            for det_cita in cita.detalles.all().order_by("orden_visual", "created_at"):
+                precio = det_cita.precio_referencial or Decimal("0.00")
+                PresupuestoDetalle.objects.create(
+                    empresa=self.request.tenant,
+                    presupuesto=presupuesto,
+                    servicio_catalogo=det_cita.servicio_catalogo,
+                    descripcion=(det_cita.servicio_catalogo.nombre if det_cita.servicio_catalogo else "Servicio"),
+                    cantidad=1,
+                    tiempo_estandar_min=det_cita.tiempo_estandar_min or 0,
+                    precio_unitario=precio,
+                    subtotal=precio,
+                    estado=EstadoPresupuestoDetalle.ACTIVO,
+                )
+                subtotal_pres += precio
+            presupuesto.subtotal = subtotal_pres
+            presupuesto.total = subtotal_pres
+            presupuesto.save(update_fields=["subtotal", "total", "updated_at"])
 
             # Registrar auditorÃ­a
             registrar_evento_on_commit(
@@ -769,7 +812,95 @@ class CitasViewSet(viewsets.ModelViewSet):
         serializer_respuesta = self.get_serializer(nueva_cita)
         return Response(serializer_respuesta.data, status=status.HTTP_201_CREATED)
 
-    @action(detail=False, methods=["post"])
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="marcar-no-show",
+        permission_classes=[IsAuthenticatedTenant, PuedeGestionarCitas],
+    )
+    def marcar_no_show(self, request, pk=None, **kwargs):
+        """
+        POST /api/{slug}/citas/{id}/marcar-no-show/
+        """
+        from datetime import timedelta
+
+        cita = self.get_object()
+        self.check_object_permissions(request, cita)
+
+        if cita.estado == EstadoCita.NO_SHOW:
+            return Response(
+                {
+                    "mensaje": "La cita ya está marcada como no-show.",
+                    "estado": cita.estado,
+                    "no_show_marcado_at": cita.no_show_marcado_at.isoformat() if cita.no_show_marcado_at else None,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        estados_permitidos = [EstadoCita.PROGRAMADA, EstadoCita.EN_ESPERA_INGRESO]
+        if cita.estado not in estados_permitidos:
+            return Response(
+                {
+                    "error": (
+                        f"No se puede marcar no-show para una cita en estado {cita.estado}. "
+                        "Solo PROGRAMADA o EN_ESPERA_INGRESO."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ahora = timezone.now()
+        limite_tolerancia = cita.fecha_hora_inicio_programada + timedelta(minutes=self.NO_SHOW_TOLERANCIA_MIN)
+        if ahora < limite_tolerancia:
+            return Response(
+                {
+                    "error": (
+                        "La cita aún está dentro del tiempo de tolerancia para no-show. "
+                        f"Tolerancia: {self.NO_SHOW_TOLERANCIA_MIN} minutos."
+                    ),
+                    "puede_marcar_desde": limite_tolerancia.isoformat(),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        observacion = request.data.get("observacion", "")
+
+        with transaction.atomic():
+            cita.estado = EstadoCita.NO_SHOW
+            cita.no_show_marcado_at = ahora
+            if observacion:
+                cita.motivo_cancelacion = observacion
+            cita.save(update_fields=["estado", "no_show_marcado_at", "motivo_cancelacion", "updated_at"])
+
+            for cita_detalle in cita.detalles.all():
+                if cita_detalle.plan_detalle:
+                    cita_detalle.plan_detalle.estado = EstadoPlanServicioDetalle.PENDIENTE
+                    cita_detalle.plan_detalle.save(update_fields=["estado", "updated_at"])
+
+            registrar_evento_on_commit(
+                empresa=self.request.tenant,
+                usuario=request.user,
+                accion=AccionAuditoria.CITA_ACTUALIZADA,
+                entidad_tipo="Cita",
+                entidad_id=str(cita.id),
+                descripcion="Cita marcada como no-show",
+                metadata={
+                    "estado_nuevo": EstadoCita.NO_SHOW,
+                    "no_show_marcado_at": ahora.isoformat(),
+                    "observacion": observacion,
+                },
+            )
+
+        return Response(
+            {
+                "mensaje": "Cita marcada como no-show.",
+                "estado": cita.estado,
+                "no_show_marcado_at": cita.no_show_marcado_at.isoformat(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="preview-intencion")
     def preview_intencion(self, request, **kwargs):
         """
         Preview/ValidaciÃ³n tentativa de una INTENCIÃ“N de cita.
@@ -977,6 +1108,244 @@ class CitasViewSet(viewsets.ModelViewSet):
                 {"detail": f"Error al validar disponibilidad: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @action(detail=False, methods=["get"], url_path="bloques-disponibles")
+    def bloques_disponibles(self, request, **kwargs):
+        """
+        GET /api/{slug}/citas/bloques-disponibles/
+
+        Query params:
+        - espacio_trabajo_id (UUID, requerido)
+        - fecha (YYYY-MM-DD, requerido)
+        - duracion_min (int, requerido)
+        - horizonte_dias (int, opcional, default 30)
+        - max_resultados (int, opcional, default 80)
+        """
+        from datetime import datetime, timedelta
+        from modulos.vehiculos_servicios_plan_citas.services.citas_programacion_service import CitasProgramacionService
+
+        empresa = self.request.tenant if hasattr(self.request, "tenant") else None
+        if not empresa:
+            return Response({"detail": "Tenant no encontrado"}, status=status.HTTP_400_BAD_REQUEST)
+
+        espacio_id = request.query_params.get("espacio_trabajo_id")
+        fecha_str = request.query_params.get("fecha")
+        duracion_min_str = request.query_params.get("duracion_min")
+        horizonte_str = request.query_params.get("horizonte_dias", "30")
+        max_resultados_str = request.query_params.get("max_resultados", "80")
+
+        if not espacio_id or not fecha_str or not duracion_min_str:
+            return Response(
+                {"detail": "Parámetros requeridos: espacio_trabajo_id, fecha, duracion_min"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            duracion_min = int(duracion_min_str)
+            horizonte_dias = int(horizonte_str)
+            max_resultados = int(max_resultados_str)
+        except ValueError:
+            return Response(
+                {"detail": "duracion_min, horizonte_dias y max_resultados deben ser enteros"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if duracion_min <= 0:
+            return Response({"detail": "duracion_min debe ser mayor que 0"}, status=status.HTTP_400_BAD_REQUEST)
+        if duracion_min % 30 != 0:
+            return Response({"detail": "duracion_min debe ser múltiplo de 30"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            espacio = EspacioTrabajo.objects.get(id=espacio_id, empresa=empresa)
+        except EspacioTrabajo.DoesNotExist:
+            return Response({"detail": "Espacio de trabajo no encontrado"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            fecha_base = datetime.strptime(fecha_str, "%Y-%m-%d")
+        except ValueError:
+            return Response({"detail": "Formato de fecha inválido. Use YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
+
+        tz_operativa = CitasProgramacionService.obtener_timezone_operativa(empresa)
+        fecha_base_op = tz_operativa.localize(datetime.combine(fecha_base.date(), datetime.min.time()))
+
+        resultados = []
+        for offset in range(horizonte_dias):
+            if len(resultados) >= max_resultados:
+                break
+
+            fecha_actual = fecha_base_op + timedelta(days=offset)
+            ventanas = CitasProgramacionService.obtener_ventanas_operativas_dia(
+                espacio_id=str(espacio.id),
+                fecha=fecha_actual,
+                empresa=empresa,
+            )
+            if not ventanas:
+                continue
+
+            ocupacion = CitasProgramacionService.obtener_ocupacion_espacio_dia(
+                espacio_id=str(espacio.id),
+                fecha=fecha_actual,
+                empresa=empresa,
+            )
+            ventanas_libres = CitasProgramacionService.restar_ocupacion_ventanas(ventanas, ocupacion)
+
+            inicio_minimo = None
+            if offset == 0:
+                inicio_minimo = 0
+
+            candidatos = CitasProgramacionService._bloques_inicio_desde_ventanas(
+                ventanas_libres,
+                inicio_minimo=inicio_minimo,
+            )
+
+            for minuto in candidatos:
+                dt_op = tz_operativa.localize(
+                    datetime.combine(
+                        fecha_actual.date(),
+                        datetime.min.time().replace(hour=minuto // 60, minute=minuto % 60),
+                    )
+                )
+                dt_utc = dt_op.astimezone(timezone.utc)
+
+                valido_temp, _ = CitasProgramacionService.validar_inicio_no_pasado(dt_utc, empresa)
+                if not valido_temp:
+                    continue
+
+                res = CitasProgramacionService.construir_reserva_desde_inicio_exacto(
+                    espacio_id=str(espacio.id),
+                    fecha_hora_inicio=dt_utc,
+                    duracion_requerida_min=duracion_min,
+                    empresa=empresa,
+                    horizonte_dias=horizonte_dias,
+                )
+                if not res.valido:
+                    continue
+
+                resultados.append(
+                    {
+                        "inicio": dt_utc.isoformat(),
+                        "fecha": dt_op.strftime("%Y-%m-%d"),
+                        "hora": dt_op.strftime("%H:%M"),
+                    }
+                )
+                if len(resultados) >= max_resultados:
+                    break
+
+        return Response(
+            {
+                "espacio_id": str(espacio.id),
+                "espacio_nombre": espacio.nombre,
+                "duracion_min": duracion_min,
+                "fecha_base": fecha_base_op.strftime("%Y-%m-%d"),
+                "horizonte_dias": horizonte_dias,
+                "bloques_disponibles": resultados,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["get"], url_path="agenda")
+    def agenda(self, request, **kwargs):
+        """
+        GET /api/{slug}/citas/agenda/
+
+        Query params:
+        - vista: dia|semana|lista (default: dia)
+        - fecha: YYYY-MM-DD (default: hoy)
+        - estado, cliente_id, vehiculo_id, espacio_id, asesor_id, search (opcionales)
+        """
+        from datetime import datetime, timedelta
+
+        vista = request.query_params.get("vista", "dia").lower()
+        if vista not in ["dia", "semana", "lista"]:
+            return Response({"detail": "vista inválida. Use dia, semana o lista."}, status=status.HTTP_400_BAD_REQUEST)
+
+        fecha_str = request.query_params.get("fecha")
+        if fecha_str:
+            try:
+                fecha_base = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response({"detail": "fecha inválida. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            fecha_base = timezone.now().date()
+
+        if vista == "semana":
+            inicio_rango = fecha_base - timedelta(days=fecha_base.weekday())
+            fin_rango = inicio_rango + timedelta(days=6)
+        else:
+            inicio_rango = fecha_base
+            fin_rango = fecha_base
+
+        queryset = self.get_queryset().filter(
+            fecha_hora_inicio_programada__date__gte=inicio_rango,
+            fecha_hora_inicio_programada__date__lte=fin_rango,
+        ).select_related(
+            "vehiculo", "cliente", "asesor_responsable"
+        ).prefetch_related(
+            "detalles__servicio_catalogo",
+            "espacios_segmentos__espacio_trabajo",
+        )
+
+        estado = request.query_params.get("estado")
+        cliente_id = request.query_params.get("cliente_id")
+        vehiculo_id = request.query_params.get("vehiculo_id")
+        espacio_id = request.query_params.get("espacio_id")
+        asesor_id = request.query_params.get("asesor_id")
+        search = request.query_params.get("search")
+
+        if estado:
+            queryset = queryset.filter(estado=estado)
+        if cliente_id:
+            queryset = queryset.filter(cliente_id=cliente_id)
+        if vehiculo_id:
+            queryset = queryset.filter(vehiculo_id=vehiculo_id)
+        if asesor_id:
+            queryset = queryset.filter(asesor_responsable_id=asesor_id)
+        if espacio_id:
+            queryset = queryset.filter(espacios_segmentos__espacio_trabajo_id=espacio_id).distinct()
+        if search:
+            queryset = queryset.filter(
+                Q(vehiculo__placa__icontains=search)
+                | Q(cliente__nombres__icontains=search)
+                | Q(cliente__email__icontains=search)
+            )
+
+        citas = queryset.order_by("fecha_hora_inicio_programada")
+        citas_data = [self._serializar_cita_agenda(c) for c in citas]
+        capacidad = self._construir_capacidad_agenda(
+            empresa=self.request.tenant,
+            fecha_inicio=inicio_rango,
+            fecha_fin=fin_rango,
+            espacio_id=espacio_id,
+        )
+
+        agrupado_por_fecha = {}
+        for cita in citas_data:
+            fecha_key = cita["inicio"][:10]
+            agrupado_por_fecha.setdefault(fecha_key, []).append(cita)
+
+        return Response(
+            {
+                "vista": vista,
+                "fecha_base": str(fecha_base),
+                "rango": {"inicio": str(inicio_rango), "fin": str(fin_rango)},
+                "filtros": {
+                    "estado": estado,
+                    "cliente_id": cliente_id,
+                    "vehiculo_id": vehiculo_id,
+                    "espacio_id": espacio_id,
+                    "asesor_id": asesor_id,
+                    "search": search,
+                },
+                "resumen": {
+                    "total_citas": len(citas_data),
+                    "sin_resultados": len(citas_data) == 0,
+                },
+                "capacidad_espacios": capacidad,
+                "citas": citas_data,
+                "citas_por_fecha": agrupado_por_fecha,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     # ============================================================================
     # ACCIONES DE CU21 - RECEPCIÃ“N MÃNIMA DE VEHÃCULOS
@@ -1465,5 +1834,108 @@ class CitasViewSet(viewsets.ModelViewSet):
                     "duracion_min": seg["duracion_min"],
                 }
             )
+        return resultado
+
+    def _serializar_cita_agenda(self, cita):
+        servicios = []
+        for d in cita.detalles.all():
+            nombre = d.servicio_catalogo.nombre if d.servicio_catalogo else "Servicio"
+            servicios.append(
+                {
+                    "id": str(d.id),
+                    "nombre": nombre,
+                    "duracion_min": d.tiempo_estandar_min,
+                    "estado": d.estado,
+                }
+            )
+
+        segmentos = []
+        for s in cita.espacios_segmentos.all().order_by("orden_segmento"):
+            segmentos.append(
+                {
+                    "id": str(s.id),
+                    "espacio_id": str(s.espacio_trabajo_id) if s.espacio_trabajo_id else None,
+                    "espacio_nombre": s.espacio_trabajo.nombre if s.espacio_trabajo else "Sin espacio",
+                    "inicio": s.inicio_programado.isoformat(),
+                    "fin": s.fin_programado.isoformat(),
+                }
+            )
+
+        return {
+            "id": str(cita.id),
+            "estado": cita.estado,
+            "estado_display": cita.get_estado_display(),
+            "inicio": cita.fecha_hora_inicio_programada.isoformat(),
+            "fin": cita.fecha_hora_fin_programada.isoformat(),
+            "vehiculo_placa": cita.vehiculo.placa if cita.vehiculo else None,
+            "cliente_nombre": cita.cliente.nombres if cita.cliente else None,
+            "asesor_nombre": cita.asesor_responsable.nombres if cita.asesor_responsable else None,
+            "motivo_visita": cita.motivo_visita,
+            "servicios": servicios,
+            "segmentos": segmentos,
+        }
+
+    def _construir_capacidad_agenda(self, empresa, fecha_inicio, fecha_fin, espacio_id=None):
+        from datetime import datetime, time, timedelta
+
+        espacios_qs = EspacioTrabajo.objects.filter(empresa=empresa, activo=True)
+        if espacio_id:
+            espacios_qs = espacios_qs.filter(id=espacio_id)
+        espacios = list(espacios_qs)
+
+        resultado = []
+        for espacio in espacios:
+            horarios = HorarioEspacioTrabajo.objects.filter(
+                empresa=empresa,
+                espacio_trabajo=espacio,
+                activo=True,
+            )
+            planificable = horarios.exists()
+            capacidad_min = 0
+            ocupacion_min = 0
+
+            if planificable:
+                current = fecha_inicio
+                while current <= fecha_fin:
+                    dia = current.weekday()
+                    horarios_dia = horarios.filter(dia_semana=dia)
+                    for h in horarios_dia:
+                        ini = h.hora_inicio.hour * 60 + h.hora_inicio.minute
+                        fin = h.hora_fin.hour * 60 + h.hora_fin.minute
+                        if fin > ini:
+                            capacidad_min += fin - ini
+                    current += timedelta(days=1)
+
+                ini_dt = timezone.make_aware(datetime.combine(fecha_inicio, time.min))
+                fin_dt = timezone.make_aware(datetime.combine(fecha_fin + timedelta(days=1), time.min))
+                segmentos = CitaEspacioSegmento.objects.filter(
+                    empresa=empresa,
+                    espacio_trabajo=espacio,
+                    inicio_programado__lt=fin_dt,
+                    fin_programado__gt=ini_dt,
+                    cita__estado__in=[EstadoCita.PROGRAMADA, EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO],
+                )
+                for seg in segmentos:
+                    inicio = max(seg.inicio_programado, ini_dt)
+                    fin = min(seg.fin_programado, fin_dt)
+                    if fin > inicio:
+                        ocupacion_min += int((fin - inicio).total_seconds() // 60)
+
+            disponible_min = max(capacidad_min - ocupacion_min, 0)
+            porcentaje = round((ocupacion_min * 100 / capacidad_min), 2) if capacidad_min > 0 else 0
+
+            resultado.append(
+                {
+                    "espacio_id": str(espacio.id),
+                    "espacio_nombre": espacio.nombre,
+                    "tipo": espacio.tipo,
+                    "planificable": planificable,
+                    "capacidad_min": capacidad_min,
+                    "ocupacion_min": ocupacion_min,
+                    "disponible_min": disponible_min,
+                    "ocupacion_pct": porcentaje,
+                }
+            )
+
         return resultado
 

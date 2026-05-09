@@ -1,9 +1,19 @@
-﻿"""
-Punto de entrada modular para rutas de inventario/proveedores/administracion.
+﻿from django.urls import include, path
+from rest_framework.routers import DefaultRouter
 
-Aun sin viewsets publicados en esta fase.
-"""
+from modulos.inventario_proveedores_administracion.viewsets import (
+    CategoriaInventarioViewSet,
+    ItemInventarioViewSet,
+    MovimientoInventarioViewSet,
+    SolicitudRepuestoViewSet,
+)
 
-from django.urls import path
+router = DefaultRouter()
+router.register(r"categorias-inventario", CategoriaInventarioViewSet, basename="categoria-inventario")
+router.register(r"items-inventario", ItemInventarioViewSet, basename="item-inventario")
+router.register(r"movimientos-inventario", MovimientoInventarioViewSet, basename="movimiento-inventario")
+router.register(r"solicitudes-repuesto", SolicitudRepuestoViewSet, basename="solicitud-repuesto")
 
-urlpatterns = []
+urlpatterns = [
+    path("", include(router.urls)),
+]

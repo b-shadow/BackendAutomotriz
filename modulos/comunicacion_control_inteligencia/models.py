@@ -4,16 +4,30 @@ import uuid
 
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from django.utils import timezone
 
 from modulos.administracion_acceso_configuracion.models import Empresa, Usuario
 
 PlantillaNotificacion = None
-Backup = None
-BackupProgramado = None
-RestauracionBackup = None
 PermisoAccionIA = None
 PlantillaReporte = None
 ArchivoReporte = None
+
+
+class EstadoBackup(models.TextChoices):
+    EN_PROCESO = "EN_PROCESO", _("En proceso")
+    COMPLETADO = "COMPLETADO", _("Completado")
+    FALLIDO = "FALLIDO", _("Fallido")
+
+
+class TipoBackup(models.TextChoices):
+    MANUAL = "MANUAL", _("Manual")
+    AUTOMATICO = "AUTOMATICO", _("Automático")
+    COMPENSACION = "COMPENSACION", _("Compensación")
+
+
+class AlcanceBackup(models.TextChoices):
+    TENANT_COMPLETO = "TENANT_COMPLETO", _("Tenant completo")
 
 class CanalEntregaNotificacion(models.TextChoices):
     """Canales de entrega de notificaciones."""
@@ -54,6 +68,85 @@ class FormatoReporteGenerado(models.TextChoices):
     PDF = "PDF", _("PDF")
     CSV = "CSV", _("CSV")
     HTML = "HTML", _("HTML")
+
+
+class BackupEmpresa(models.Model):
+    """Historial de backups por empresa."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    empresa = models.ForeignKey(
+        Empresa,
+        on_delete=models.CASCADE,
+        related_name="backups",
+        verbose_name=_("empresa"),
+    )
+    estado = models.CharField(
+        _("estado"),
+        max_length=20,
+        choices=EstadoBackup.choices,
+        default=EstadoBackup.EN_PROCESO,
+        db_index=True,
+    )
+    tipo = models.CharField(
+        _("tipo"),
+        max_length=20,
+        choices=TipoBackup.choices,
+        default=TipoBackup.MANUAL,
+    )
+    alcance = models.CharField(
+        _("alcance"),
+        max_length=30,
+        choices=AlcanceBackup.choices,
+        default=AlcanceBackup.TENANT_COMPLETO,
+    )
+    solicitado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="backups_solicitados",
+        verbose_name=_("solicitado por"),
+    )
+    iniciado_at = models.DateTimeField(_("iniciado en"), auto_now_add=True)
+    completado_at = models.DateTimeField(_("completado en"), null=True, blank=True)
+    archivo_path = models.CharField(_("ruta archivo"), max_length=500, null=True, blank=True)
+    tamano_bytes = models.BigIntegerField(_("tamaño (bytes)"), default=0)
+    error = models.CharField(_("error"), max_length=1000, null=True, blank=True)
+    metadata = models.JSONField(_("metadata"), default=dict, blank=True)
+
+    class Meta:
+        db_table = "backups_empresa"
+        ordering = ["-iniciado_at"]
+        verbose_name = _("Backup Empresa")
+        verbose_name_plural = _("Backups Empresa")
+        indexes = [models.Index(fields=["empresa", "-iniciado_at"])]
+
+
+class ProgramacionBackupEmpresa(models.Model):
+    """Configuración de backup automático por empresa."""
+    FRECUENCIA_CHOICES = [
+        ("DIARIO", _("Diario")),
+        ("CADA_N_DIAS", _("Cada N días")),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    empresa = models.OneToOneField(
+        Empresa,
+        on_delete=models.CASCADE,
+        related_name="programacion_backup",
+        verbose_name=_("empresa"),
+    )
+    activo = models.BooleanField(_("activo"), default=False)
+    frecuencia = models.CharField(_("frecuencia"), max_length=20, choices=FRECUENCIA_CHOICES, default="DIARIO")
+    intervalo_dias = models.IntegerField(_("intervalo días"), default=1)
+    hora_ejecucion = models.TimeField(_("hora de ejecución"), default=timezone.now)
+    tolera_compensacion = models.BooleanField(_("tolerar compensación"), default=True)
+    ultima_ejecucion_at = models.DateTimeField(_("última ejecución"), null=True, blank=True)
+    proxima_ejecucion_at = models.DateTimeField(_("próxima ejecución"), null=True, blank=True, db_index=True)
+    updated_at = models.DateTimeField(_("actualizado en"), auto_now=True)
+
+    class Meta:
+        db_table = "programacion_backups_empresa"
+        verbose_name = _("Programación Backup Empresa")
+        verbose_name_plural = _("Programación Backups Empresa")
 
 # ============================================================================
 # Sección 11: Notificaciones

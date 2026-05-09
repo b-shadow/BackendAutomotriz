@@ -17,10 +17,13 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db import transaction
 from django.utils import timezone
+from decimal import Decimal
 
 from modulos.atencion_tecnica_ejecucion.models import RecepcionVehiculo
+from modulos.atencion_tecnica_ejecucion.models import PresupuestoCita
 from modulos.vehiculos_servicios_plan_citas.models import Cita, EstadoCita
 from modulos.administracion_acceso_configuracion.models import Usuario
+from modulos.inventario_proveedores_administracion.models import PagoTaller, EstadoPagoTaller
 from modulos.atencion_tecnica_ejecucion.serializers.recepciones import (
     RecepcionVehiculoSerializer,
     RecepcionVehiculoCreacionSerializer,
@@ -67,7 +70,7 @@ class PuedeGestionarRecepcion(permissions.BasePermission):
         rol_nombre = request.user.rol.nombre if request.user.rol else None
         
         # Solo ADMIN y ASESOR DE SERVICIO pueden crear/editar recepciones
-        if view.action in ["create", "update", "partial_update", "destroy"]:
+        if view.action in ["create", "update", "partial_update", "destroy", "marcar_recogida"]:
             return rol_nombre in ["ASESOR DE SERVICIO", "ADMIN"]
         
         # Otros roles (MECANICO, etc) solo pueden ver
@@ -221,10 +224,10 @@ class RecepcionVehiculoViewSet(viewsets.ModelViewSet):
         """
         empresa_id = getattr(request, "tenant_id", None)
 
-        # Citas en estado PROGRAMADA (listas para recibir)
+        # Citas en estado PROGRAMADA o EN_ESPERA_INGRESO (listas para recibir)
         citas = Cita.objects.filter(
             empresa_id=empresa_id,
-            estado=EstadoCita.PROGRAMADA,
+            estado__in=[EstadoCita.PROGRAMADA, EstadoCita.EN_ESPERA_INGRESO],
         ).select_related(
             "vehiculo",
             "vehiculo__propietario",
@@ -245,6 +248,65 @@ class RecepcionVehiculoViewSet(viewsets.ModelViewSet):
 
         serializer = CitaListadoSerializer(citas, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=["get"], url_path="pendientes-operacion")
+    def pendientes_operacion(self, request, **kwargs):
+        """
+        Retorna dos listas:
+        1) pendientes_recepcion: citas que aún no fueron recibidas
+        2) pendientes_recogida: recepciones registradas sin fecha de recogida
+        """
+        empresa_id = getattr(request, "tenant_id", None)
+        citas = Cita.objects.filter(
+            empresa_id=empresa_id,
+            estado__in=[EstadoCita.PROGRAMADA, EstadoCita.EN_ESPERA_INGRESO],
+        ).exclude(recepcion__isnull=False).select_related(
+            "vehiculo", "vehiculo__propietario", "plan_servicio",
+        ).prefetch_related("detalles", "detalles__servicio_catalogo")
+
+        recepciones = self.get_queryset().filter(fecha_recogida__isnull=True)
+
+        return Response({
+            "pendientes_recepcion": CitaListadoSerializer(citas.order_by("fecha_hora_inicio_programada"), many=True).data,
+            "pendientes_recogida": RecepcionVehiculoListaSerializer(recepciones.order_by("-fecha_recepcion"), many=True).data,
+        })
+
+    @action(detail=True, methods=["post"], url_path="marcar-recogida")
+    @transaction.atomic
+    def marcar_recogida(self, request, pk=None, **kwargs):
+        recepcion = self.get_object()
+        if recepcion.fecha_recogida:
+            return Response({"error": "La recepción ya fue marcada como recogida."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Regla: no se puede recoger si el presupuesto no está pagado al 100%.
+        try:
+            presupuesto = PresupuestoCita.objects.get(empresa=recepcion.empresa, cita=recepcion.cita)
+        except PresupuestoCita.DoesNotExist:
+            return Response(
+                {"error": "No se puede marcar recogida: la cita no tiene presupuesto asociado."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        total = presupuesto.total or Decimal("0.00")
+        pagado = Decimal("0.00")
+        pagos = PagoTaller.objects.filter(
+            empresa=recepcion.empresa,
+            cita=recepcion.cita,
+        ).exclude(estado=EstadoPagoTaller.ANULADO)
+        for p in pagos:
+            pagado += p.monto_total or Decimal("0.00")
+
+        if pagado < total:
+            pendiente = (total - pagado).quantize(Decimal("0.01"))
+            return Response(
+                {"error": f"No se puede marcar recogida: saldo pendiente Bs {pendiente}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        recepcion.fecha_recogida = timezone.now()
+        recepcion.recogido_por = request.user
+        recepcion.save(update_fields=["fecha_recogida", "recogido_por", "updated_at"])
+        return Response(RecepcionVehiculoDetalleSerializer(recepcion).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="cita-info")
     def cita_info(self, request, pk=None, empresa_slug=None, **kwargs):

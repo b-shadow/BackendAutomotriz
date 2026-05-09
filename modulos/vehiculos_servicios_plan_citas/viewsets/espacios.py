@@ -47,6 +47,9 @@ from modulos.vehiculos_servicios_plan_citas.serializers.taller import (
     HorarioEspacioTrabajoEdicionSerializer,
     HorarioEspacioTrabajoActivoSerializer,
 )
+from modulos.vehiculos_servicios_plan_citas.serializers.espacios import (
+    HorarioEspacioBloquesSerializer,
+)
 from modulos.administracion_acceso_configuracion.services.auditoria_service import (
     registrar_evento_desde_request,
     construir_cambios,
@@ -155,6 +158,8 @@ class EspaciosTrabajoViewSet(viewsets.ModelViewSet):
             return HorarioEspacioTrabajoEdicionSerializer
         elif self.action == "activo_horario":
             return HorarioEspacioTrabajoActivoSerializer
+        elif self.action == "horarios_bloques":
+            return HorarioEspacioBloquesSerializer
         return EspacioTrabajoDetalleSerializer
 
     def get_permissions(self):
@@ -165,7 +170,7 @@ class EspaciosTrabajoViewSet(viewsets.ModelViewSet):
             # list, retrieve y horarios: todos autenticados en tenant
             permission_classes = [IsAuthenticatedTenant]
         elif self.action in ["create", "update", "partial_update", "estado", "activo", 
-                            "crear_horario", "editar_horario", "activo_horario", "eliminar_horario"]:
+                            "crear_horario", "editar_horario", "activo_horario", "eliminar_horario", "horarios_bloques"]:
             # Solo ADMIN y ASESOR DE SERVICIO
             permission_classes = [PuedeGestionarEspacios]
         else:
@@ -665,3 +670,91 @@ class EspaciosTrabajoViewSet(viewsets.ModelViewSet):
             status=status.HTTP_204_NO_CONTENT
         )
 
+    @action(detail=True, methods=["put"], url_path="horarios-bloques")
+    def horarios_bloques(self, request, pk=None, **kwargs):
+        """
+        PUT /api/{slug}/espacios/{id}/horarios-bloques/
+
+        Reemplaza horarios de un día por selección de bloques de 30 minutos.
+        Payload:
+        {
+          "dia_semana": 0,
+          "bloques_inicio_min": [480, 510, 540]
+        }
+        """
+        espacio = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        dia_semana = serializer.validated_data["dia_semana"]
+        bloques = serializer.validated_data["bloques_inicio_min"]
+
+        # Agrupar bloques consecutivos en rangos [inicio, fin)
+        rangos = []
+        if bloques:
+            inicio = bloques[0]
+            previo = bloques[0]
+            for b in bloques[1:]:
+                if b == previo + 30:
+                    previo = b
+                    continue
+                rangos.append((inicio, previo + 30))
+                inicio = b
+                previo = b
+            rangos.append((inicio, previo + 30))
+
+        def _min_to_hhmmss(minuto):
+            hh = minuto // 60
+            mm = minuto % 60
+            return f"{hh:02d}:{mm:02d}:00"
+
+        with transaction.atomic():
+            # Reemplazo completo de horarios del día
+            horarios_dia = HorarioEspacioTrabajo.objects.filter(
+                empresa=request.tenant,
+                espacio_trabajo=espacio,
+                dia_semana=dia_semana,
+            )
+            eliminados = horarios_dia.count()
+            horarios_dia.delete()
+
+            creados = []
+            for ini, fin in rangos:
+                horario = HorarioEspacioTrabajo.objects.create(
+                    empresa=request.tenant,
+                    espacio_trabajo=espacio,
+                    dia_semana=dia_semana,
+                    hora_inicio=_min_to_hhmmss(ini),
+                    hora_fin=_min_to_hhmmss(fin),
+                    activo=True,
+                )
+                creados.append(horario)
+
+        dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        registrar_evento_desde_request(
+            request,
+            empresa=request.tenant,
+            accion=AccionAuditoria.HORARIO_ESPACIO_ACTUALIZADO,
+            usuario=request.user,
+            entidad_tipo="EspacioTrabajo",
+            entidad_id=espacio.id,
+            descripcion=f"Horario por bloques actualizado para '{espacio.nombre}' ({dias[dia_semana]})",
+            metadata={
+                "dia_semana": dia_semana,
+                "dia_nombre": dias[dia_semana],
+                "bloques_count": len(bloques),
+                "rangos_count": len(rangos),
+                "horarios_eliminados": eliminados,
+            },
+        )
+
+        response_serializer = HorarioEspacioTrabajoListadoSerializer(creados, many=True)
+        return Response(
+            {
+                "mensaje": "Horarios por bloques actualizados exitosamente",
+                "espacio_id": str(espacio.id),
+                "dia_semana": dia_semana,
+                "bloques_inicio_min": bloques,
+                "rangos": response_serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )

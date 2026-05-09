@@ -31,11 +31,15 @@ class IAViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Solo conversaciones del usuario y empresa actual
+        # Solo conversaciones ACTIVAS del usuario, priorizando las que tienen mensajes
+        from django.db.models import Count
         return self.queryset.filter(
             empresa=self.request.user.empresa,
-            usuario=self.request.user
-        )
+            usuario=self.request.user,
+            estado='ACTIVA'
+        ).annotate(
+            num_mensajes=Count('mensajes')
+        ).order_by('-num_mensajes', '-updated_at')
 
     def perform_create(self, serializer):
         serializer.save(
@@ -43,6 +47,28 @@ class IAViewSet(viewsets.ModelViewSet):
             usuario=self.request.user,
             canal=CanalConversacionIA.WEB
         )
+
+    def retrieve(self, request, pk=None, **kwargs):
+        """Devuelve una conversación con todos sus mensajes."""
+        conversacion = self.get_object()
+        mensajes = MensajeIA.objects.filter(conversacion=conversacion).order_by('created_at')
+        mensajes_data = [{
+            'id': str(m.id),
+            'sender': 'user' if m.rol_mensaje == RolMensajeIA.USUARIO else 'ai',
+            'text': m.contenido,
+            'created_at': m.created_at.isoformat()
+        } for m in mensajes]
+        conv_data = ConversacionIASerializer(conversacion).data
+        conv_data['mensajes'] = mensajes_data
+        return response.Response(conv_data)
+
+    @action(detail=True, methods=['post'])
+    def archivar(self, request, pk=None, **kwargs):
+        """Archiva una conversación (la marca como ARCHIVADA)."""
+        conversacion = self.get_object()
+        conversacion.estado = 'ARCHIVADA'
+        conversacion.save()
+        return response.Response({'status': 'success', 'message': 'Conversación archivada correctamente.'})
 
     @action(detail=True, methods=['post'])
     def enviar_mensaje(self, request, pk=None, **kwargs):

@@ -1,6 +1,9 @@
 """Serializers base del modulo de administracion/acceso/configuracion."""
 
 from rest_framework import serializers
+from modulos.administracion_acceso_configuracion.serializers.password_policy import (
+    validate_strong_password,
+)
 
 from modulos.administracion_acceso_configuracion.models import (
     Auditoria,
@@ -63,7 +66,12 @@ class RegistroEmpresaConPagoSerializer(serializers.Serializer):
     usuario_nombres = serializers.CharField(max_length=255)
     usuario_apellidos = serializers.CharField(max_length=255, required=False, allow_blank=True)
     usuario_email = serializers.EmailField()
-    usuario_password = serializers.CharField(write_only=True, style={"input_type": "password"}, min_length=6)
+    usuario_password = serializers.CharField(
+        write_only=True,
+        style={"input_type": "password"},
+        min_length=8,
+        validators=[validate_strong_password],
+    )
     plan_id = serializers.UUIDField()
     customer_email = serializers.EmailField(required=False)
     customer_name = serializers.CharField(max_length=255, required=False)

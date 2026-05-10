@@ -22,7 +22,6 @@ from django.db.utils import IntegrityError
 from django.conf import settings
 from datetime import timedelta
 import stripe
-import os
 import logging
 
 from modulos.administracion_acceso_configuracion.models import Suscripcion, Plan, Pago, Empresa, EstadoSuscripcion
@@ -38,7 +37,7 @@ from modulos.administracion_acceso_configuracion.services.auditoria_service impo
     AccionAuditoria,
 )
 # Configurar Stripe
-stripe.api_key = os.getenv('STRIPE_SECRET_KEY', 'sk_test_default')
+stripe.api_key = settings.STRIPE_SECRET_KEY
 logger = logging.getLogger(__name__)
 
 class SuscripcionViewSet(viewsets.ViewSet):

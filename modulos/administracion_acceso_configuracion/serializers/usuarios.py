@@ -2,6 +2,9 @@
 from rest_framework import serializers
 from django.contrib.auth.hashers import make_password
 from modulos.administracion_acceso_configuracion.models import Usuario, Rol
+from modulos.administracion_acceso_configuracion.serializers.password_policy import (
+    validate_strong_password,
+)
 
 
 class RolSimplesSerializer(serializers.ModelSerializer):
@@ -35,7 +38,9 @@ class UsuarioListadoSerializer(serializers.ModelSerializer):
 
 
 class UsuarioCreadoSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(
+        write_only=True, min_length=8, validators=[validate_strong_password]
+    )
 
     class Meta:
         model = Usuario
@@ -98,7 +103,10 @@ class UsuarioCambiarContrasenaSerializer(serializers.Serializer):
         write_only=True, style={"input_type": "password"}
     )
     contrasena_nueva = serializers.CharField(
-        write_only=True, style={"input_type": "password"}, min_length=8
+        write_only=True,
+        style={"input_type": "password"},
+        min_length=8,
+        validators=[validate_strong_password],
     )
     contrasena_confirmacion = serializers.CharField(
         write_only=True, style={"input_type": "password"}
@@ -127,10 +135,6 @@ class UsuarioCambiarContrasenaSerializer(serializers.Serializer):
         if data["contrasena_nueva"] != data["contrasena_confirmacion"]:
             raise serializers.ValidationError(
                 {"contrasena_confirmacion": "Las contrasenas no coinciden."}
-            )
-        if len(data["contrasena_nueva"]) < 8:
-            raise serializers.ValidationError(
-                {"contrasena_nueva": "La contrasena debe tener al menos 8 caracteres."}
             )
         return data
 

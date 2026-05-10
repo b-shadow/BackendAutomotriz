@@ -8,6 +8,9 @@ DISEÃ‘O MULTI-TENANT CORRECTO:
 from rest_framework import serializers
 from django.contrib.auth.hashers import make_password, check_password
 from modulos.administracion_acceso_configuracion.models import Usuario, Empresa, Rol
+from modulos.administracion_acceso_configuracion.serializers.password_policy import (
+    validate_strong_password,
+)
 
 
 class TenantResolveSerializer(serializers.ModelSerializer):
@@ -33,7 +36,8 @@ class TenantUserRegisterSerializer(serializers.Serializer):
     password = serializers.CharField(
         style={"input_type": "password"},
         write_only=True,
-        min_length=8
+        min_length=8,
+        validators=[validate_strong_password],
     )
     nombres = serializers.CharField(max_length=255)
     apellidos = serializers.CharField(max_length=255, required=False, allow_blank=True)

@@ -1,4 +1,4 @@
-﻿"""Modelos del modulo 3.5.1 Administracion, Acceso y Configuracion."""
+"""Modelos del modulo 3.5.1 Administracion, Acceso y Configuracion."""
 
 import uuid
 
@@ -43,7 +43,7 @@ class Empresa(models.Model):
         max_length=255,
         unique=True,
         db_index=True,
-        help_text="Identificador Ãºnico para URL (ej: acme, globex)"
+        help_text="Identificador único para URL (ej: acme, globex)"
     )
     estado = models.CharField(
         _("estado"),
@@ -53,10 +53,10 @@ class Empresa(models.Model):
         db_index=True,
     )
     suscripcion_hasta = models.DateTimeField(
-        _("suscripciÃ³n hasta"),
+        _("suscripción hasta"),
         null=True,
         blank=True,
-        help_text="Fecha de vencimiento de la suscripciÃ³n actual"
+        help_text="Fecha de vencimiento de la suscripción actual"
     )
     stripe_customer_id = models.CharField(
         _("Stripe Customer ID"),
@@ -65,7 +65,7 @@ class Empresa(models.Model):
         blank=True,
         unique=True,
         db_index=True,
-        help_text="ID del customer en Stripe para facturaciÃ³n"
+        help_text="ID del customer en Stripe para facturación"
     )
     created_at = models.DateTimeField(_("creado en"), auto_now_add=True)
     updated_at = models.DateTimeField(_("actualizado en"), auto_now=True)
@@ -86,21 +86,21 @@ class Empresa(models.Model):
 
 class Plan(models.Model):
     """
-    Planes de suscripciÃ³n disponibles en el SaaS.
+    Planes de suscripción disponibles en el SaaS.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     codigo = models.CharField(
-        _("cÃ³digo"),
+        _("código"),
         max_length=100,
         unique=True,
         db_index=True,
-        help_text="CÃ³digo Ãºnico del plan (ej: STARTER, PRO, ENTERPRISE)"
+        help_text="Código único del plan (ej: STARTER, PRO, ENTERPRISE)"
     )
     nombre = models.CharField(_("nombre"), max_length=255)
-    descripcion = models.CharField(_("descripciÃ³n"), max_length=500, null=True, blank=True)
+    descripcion = models.CharField(_("descripción"), max_length=500, null=True, blank=True)
     duracion_dias = models.IntegerField(
-        _("duraciÃ³n (dÃ­as)"),
-        help_text="PerÃ­odo de facturaciÃ³n en dÃ­as (30, 365, etc)"
+        _("duración (días)"),
+        help_text="Período de facturación en días (30, 365, etc)"
     )
     precio_centavos = models.IntegerField(
         _("precio (centavos)"),
@@ -111,7 +111,7 @@ class Plan(models.Model):
         _("moneda"),
         max_length=3,
         default="USD",
-        help_text="CÃ³digo de moneda ISO (USD, EUR, CLP)"
+        help_text="Código de moneda ISO (USD, EUR, CLP)"
     )
     activo = models.BooleanField(_("activo"), default=True)
     created_at = models.DateTimeField(_("creado en"), auto_now_add=True)
@@ -135,7 +135,7 @@ class Plan(models.Model):
 class Rol(models.Model):
     """
     Roles de usuario dentro de una empresa.
-    Puede ser un rol de sistema (global) o especÃ­fico de la empresa.
+    Puede ser un rol de sistema (global) o específico de la empresa.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     empresa = models.ForeignKey(
@@ -145,7 +145,7 @@ class Rol(models.Model):
         verbose_name=_("empresa"),
     )
     nombre = models.CharField(_("nombre"), max_length=100)
-    descripcion = models.CharField(_("descripciÃ³n"), max_length=500, null=True, blank=True)
+    descripcion = models.CharField(_("descripción"), max_length=500, null=True, blank=True)
     es_sistema = models.BooleanField(
         _("es sistema"),
         default=False,
@@ -170,16 +170,16 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
     
     ESTRUCTURA MULTI-TENANT:
     - Cada usuario pertenece a UNA sola empresa
-    - AutenticaciÃ³n por email dentro del contexto de esa empresa
-    - USERNAME_FIELD = "email" (Ãºnico dentro de empresa, no globalmente)
+    - Autenticación por email dentro del contexto de esa empresa
+    - USERNAME_FIELD = "email" (único dentro de empresa, no globalmente)
     
     HERENCIA:
     - AbstractBaseUser proporciona password y last_login
     - PermissionsMixin proporciona is_staff, is_superuser, groups, permissions
     
-    BÃšSQUEDA MULTI-TENANT:
+    BÚSQUEDA MULTI-TENANT:
     - Usuario.objects.filter(empresa=empresa, email=email)
-    - Usar UsuarioManager para abstracciÃ³n correcta
+    - Usar UsuarioManager para abstracción correcta
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
@@ -199,32 +199,32 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
         verbose_name=_("rol"),
     )
     
-    # AUTENTICACIÃ“N
+    # AUTENTICACIÓN
     email = models.EmailField(
         _("email"),
         max_length=255,
         db_index=True,
-        unique=False,  # No unique globalmente; Ãºnico por (empresa, email) vÃ­a UniqueConstraint
-        help_text="Email Ãºnico dentro de la empresa (no bloqueado globalmente)"
+        unique=False,  # No unique globalmente; único por (empresa, email) vía UniqueConstraint
+        help_text="Email único dentro de la empresa (no bloqueado globalmente)"
     )
     
     # DATOS PERSONALES
     nombres = models.CharField(_("nombres"), max_length=255)
     apellidos = models.CharField(_("apellidos"), max_length=255, null=True, blank=True)
-    telefono = models.CharField(_("telÃ©fono"), max_length=20, null=True, blank=True)
+    telefono = models.CharField(_("teléfono"), max_length=20, null=True, blank=True)
     
     # ESTADO
     is_active = models.BooleanField(
         _("activo"),
         default=True,
         db_index=True,
-        help_text="Designa si el usuario puede iniciar sesiÃ³n"
+        help_text="Designa si el usuario puede iniciar sesión"
     )
     
-    # PERMISOS Y ADMINISTRACIÃ“N
-    # is_staff DEBE definirse explÃ­citamente aquÃ­: PermissionsMixin NO lo proporciona.
+    # PERMISOS Y ADMINISTRACIÓN
+    # is_staff DEBE definirse explícitamente aquí: PermissionsMixin NO lo proporciona.
     # Solo hereda is_superuser, groups y user_permissions.
-    # Sin esta definiciÃ³n explÃ­cita, el campo no existirÃ­a en BD y el manager/admin serÃ­a inconsistente.
+    # Sin esta definición explícita, el campo no existiría en BD y el manager/admin sería inconsistente.
     is_staff = models.BooleanField(
         _("staff"),
         default=False,
@@ -232,51 +232,50 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
         help_text="Designa si el usuario puede acceder al panel admin de Django"
     )
     
-    # PREFERENCIAS DE NOTIFICACIÃ“N
+    # PREFERENCIAS DE NOTIFICACIÓN
     noti_email = models.BooleanField(
-        _("notificaciÃ³n por email"),
+        _("notificación por email"),
         default=True,
         help_text="Indica si el usuario desea recibir notificaciones por email"
     )
     noti_push = models.BooleanField(
-        _("notificaciÃ³n push"),
+        _("notificación push"),
         default=True,
         help_text="Indica si el usuario desea recibir notificaciones push"
     )
     
-    # AUTENTICACIÃ“N - SESIONES
+    # AUTENTICACIÓN - SESIONES
     session_revoked_at = models.DateTimeField(
-        _("sesiÃ³n revocada en"),
+        _("sesión revocada en"),
         null=True,
         blank=True,
         db_index=True,
-        help_text="Si estÃ¡ seteado, todos los tokens emitidos antes de esta fecha son invÃ¡lidos"
+        help_text="Si está seteado, todos los tokens emitidos antes de esta fecha son inválidos"
     )
     
-    # AUDITORÃA
+    # AUDITORÍA
     created_at = models.DateTimeField(_("creado en"), auto_now_add=True)
     updated_at = models.DateTimeField(_("actualizado en"), auto_now=True)
     
     # AbstractBaseUser proporciona:
-    # - password (hasheado automÃ¡ticamente)
-    # - last_login (se actualiza automÃ¡ticamente)
+    # - password (hasheado automáticamente)
+    # - last_login (se actualiza automáticamente)
     # PermissionsMixin proporciona:
     # - is_superuser, groups, user_permissions
-    # Usuario define explÃ­citamente:
-    # - is_staff (claridad + control + migraciÃ³n explÃ­cita)
+    # Usuario define explícitamente:
+    # - is_staff (claridad + control + migración explícita)
 
     # MANAGER
     objects = UsuarioManager()
     
-    # CONFIGURACIÃ“N DE AUTENTICACIÃ“N DJANGO
-    # Multi-tenant: email no es Ãºnico globalmente, es Ãºnico por (empresa, email)
+    # CONFIGURACIÓN DE AUTENTICACIÓN DJANGO
+    # Multi-tenant: email no es único globalmente, es único por (empresa, email)
     # USERNAME_FIELD se usa solo en contextos no-tenant (admin Django)
-    # En login tenant, bÃºsqueda se hace por (empresa, email) en serializers
-    USERNAME_FIELD = "id"  # Usar id como USERNAME_FIELD (Ãºnico globalmente) 
-    REQUIRED_FIELDS = []  # No requerimos campos adicionales en creaciÃ³n
+    # En login tenant, búsqueda se hace por (empresa, email) en serializers
+    USERNAME_FIELD = "id"  # Usar id como USERNAME_FIELD (único globalmente) 
+    REQUIRED_FIELDS = []  # No requerimos campos adicionales en creación
 
     class Meta:
-        app_label = "app"
         db_table = "usuarios"
         ordering = ["-created_at"]
         verbose_name = _("Usuario")
@@ -306,8 +305,8 @@ class Usuario(AbstractBaseUser, PermissionsMixin):
 
 class Suscripcion(models.Model):
     """
-    SuscripciÃ³n activa de una empresa a un plan.
-    Controla quÃ© plan tiene la empresa y cuÃ¡ndo vence.
+    Suscripción activa de una empresa a un plan.
+    Controla qué plan tiene la empresa y cuándo vence.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     empresa = models.OneToOneField(
@@ -339,8 +338,8 @@ class Suscripcion(models.Model):
         null=True,
         blank=True,
         related_name="renovaciones",
-        verbose_name=_("renovaciÃ³n de"),
-        help_text="Si es renovaciÃ³n, referencia a la suscripciÃ³n anterior"
+        verbose_name=_("renovación de"),
+        help_text="Si es renovación, referencia a la suscripción anterior"
     )
     referencia_pago = models.CharField(
         _("referencia de pago"),
@@ -356,10 +355,10 @@ class Suscripcion(models.Model):
         blank=True,
         related_name="suscripciones_pendiente",
         verbose_name=_("plan pendiente"),
-        help_text="Plan que se aplicarÃ¡ despuÃ©s de terminar el perÃ­odo actual"
+        help_text="Plan que se aplicará después de terminar el período actual"
     )
     fecha_aplicacion_plan_pendiente = models.DateTimeField(
-        _("fecha de aplicaciÃ³n del plan pendiente"),
+        _("fecha de aplicación del plan pendiente"),
         null=True,
         blank=True,
         help_text="Fecha exacta en la que el plan pendiente pasa a ser el plan actual"
@@ -375,7 +374,7 @@ class Suscripcion(models.Model):
             "Referencia AL REGISTRO ACTUAL del pago confirmado para el cambio pendiente. "
             "Este es un VINCULO al pago actualmente asociado con plan_pendiente. "
             "El historial completo de todos los pagos permanece en la tabla Pago (nunca se eliminan). "
-            "Cuando se aplica el plan_pendiente automÃ¡ticamente, este campo se limpia (SET_NULL). "
+            "Cuando se aplica el plan_pendiente automáticamente, este campo se limpia (SET_NULL). "
             "Un solo pago confirmado puede estar vinculado a la vez."
         )
     )
@@ -384,14 +383,14 @@ class Suscripcion(models.Model):
         max_length=500,
         null=True,
         blank=True,
-        help_text="Notas internas sobre la suscripciÃ³n"
+        help_text="Notas internas sobre la suscripción"
     )
     created_at = models.DateTimeField(_("creado en"), auto_now_add=True)
 
     class Meta:
         db_table = "suscripciones"
         ordering = ["-created_at"]
-        verbose_name = _("SuscripciÃ³n")
+        verbose_name = _("Suscripción")
         verbose_name_plural = _("Suscripciones")
         indexes = [
             models.Index(fields=["empresa", "estado"]),
@@ -403,8 +402,8 @@ class Suscripcion(models.Model):
 
 class Auditoria(models.Model):
     """
-    Log de auditorÃ­a de todas las acciones importantes.
-    CrÃ­tico para compliance y debugging.
+    Log de auditoría de todas las acciones importantes.
+    Crítico para compliance y debugging.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     empresa = models.ForeignKey(
@@ -422,17 +421,17 @@ class Auditoria(models.Model):
         verbose_name=_("usuario"),
     )
     accion = models.CharField(
-        _("acciÃ³n"),
+        _("acción"),
         max_length=100,
         db_index=True,
-        help_text="Tipo de acciÃ³n (crear, actualizar, eliminar, login, etc)"
+        help_text="Tipo de acción (crear, actualizar, eliminar, login, etc)"
     )
     entidad_tipo = models.CharField(
         _("tipo de entidad"),
         max_length=100,
         null=True,
         blank=True,
-        help_text="Modelo sobre el que se actuÃ³ (Usuario, Empresa, etc)"
+        help_text="Modelo sobre el que se actuó (Usuario, Empresa, etc)"
     )
     entidad_id = models.UUIDField(
         _("ID de entidad"),
@@ -441,11 +440,11 @@ class Auditoria(models.Model):
         help_text="UUID de la entidad modificada"
     )
     descripcion = models.CharField(
-        _("descripciÃ³n"),
+        _("descripción"),
         max_length=500,
         null=True,
         blank=True,
-        help_text="DescripciÃ³n legible de la acciÃ³n"
+        help_text="Descripción legible de la acción"
     )
     metadata = models.JSONField(
         _("metadata"),
@@ -456,7 +455,7 @@ class Auditoria(models.Model):
         _("IP"),
         null=True,
         blank=True,
-        help_text="IP desde donde se realizÃ³ la acciÃ³n"
+        help_text="IP desde donde se realizó la acción"
     )
     user_agent = models.CharField(
         _("user agent"),
@@ -470,8 +469,8 @@ class Auditoria(models.Model):
     class Meta:
         db_table = "auditoria"
         ordering = ["-created_at"]
-        verbose_name = _("AuditorÃ­a")
-        verbose_name_plural = _("AuditorÃ­as")
+        verbose_name = _("Auditoría")
+        verbose_name_plural = _("Auditorías")
         indexes = [
             models.Index(fields=["empresa", "-created_at"]),
             models.Index(fields=["usuario", "accion"]),
@@ -493,7 +492,7 @@ class EstadoPago(models.TextChoices):
 class Pago(models.Model):
     """
     Modelo para registrar pagos con Stripe.
-    Se usa al registrar nuevas empresas para cobrar la suscripciÃ³n inicial.
+    Se usa al registrar nuevas empresas para cobrar la suscripción inicial.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
@@ -532,7 +531,7 @@ class Pago(models.Model):
         max_length=255,
         null=True,
         blank=True,
-        help_text="Password sin hashar (se hashearÃ¡ al crear el usuario)"
+        help_text="Password sin hashar (se hasheará al crear el usuario)"
     )
     
     # Plan seleccionado
@@ -543,7 +542,7 @@ class Pago(models.Model):
         verbose_name=_("plan"),
     )
     
-    # InformaciÃ³n del pago
+    # Información del pago
     amount_centavos = models.IntegerField(
         _("monto (centavos)"),
         help_text="Monto en centavos"
@@ -552,7 +551,7 @@ class Pago(models.Model):
         _("moneda"),
         max_length=3,
         default="USD",
-        help_text="CÃ³digo de moneda ISO (USD, EUR, CLP)"
+        help_text="Código de moneda ISO (USD, EUR, CLP)"
     )
     
     # Referencias de Stripe
@@ -588,7 +587,7 @@ class Pago(models.Model):
         db_index=True,
     )
     
-    # Empresa creada (si estÃ¡ completado)
+    # Empresa creada (si está completado)
     empresa = models.ForeignKey(
         Empresa,
         on_delete=models.SET_NULL,
@@ -613,7 +612,7 @@ class Pago(models.Model):
         _("procesado en"),
         null=True,
         blank=True,
-        help_text="CuÃ¡ndo se procesÃ³ el pago exitosamente"
+        help_text="Cuándo se procesó el pago exitosamente"
     )
 
     class Meta:

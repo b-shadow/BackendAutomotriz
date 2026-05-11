@@ -342,21 +342,23 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         if rol_nombre == 'USUARIO' and presupuesto.cita.cliente_id != request.user.id:
             return Response({'error': 'No autorizado para pagar este presupuesto.'}, status=status.HTTP_403_FORBIDDEN)
 
-        porcentaje = Decimal(str(request.data.get('porcentaje') or '0'))
-        if porcentaje not in [Decimal('25'), Decimal('50'), Decimal('75'), Decimal('100')]:
-            return Response({'error': 'El porcentaje debe ser 25, 50, 75 o 100.'}, status=status.HTTP_400_BAD_REQUEST)
-
         total = presupuesto.total or Decimal('0.00')
         pagado_actual = self._monto_pagado(presupuesto)
         pendiente = total - pagado_actual
         if pendiente <= Decimal('0.00'):
             return Response({'error': 'Este presupuesto ya esta pagado al 100%.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        monto = (pendiente * (porcentaje / Decimal('100'))).quantize(Decimal('0.01'))
+        monto_raw = request.data.get('monto')
+        if monto_raw in [None, ""]:
+            return Response({'error': 'Debe enviar el monto a pagar.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            monto = Decimal(str(monto_raw)).quantize(Decimal('0.01'))
+        except Exception:
+            return Response({'error': 'Monto invalido.'}, status=status.HTTP_400_BAD_REQUEST)
         if monto <= Decimal('0.00'):
             return Response({'error': 'Monto de pago invalido.'}, status=status.HTTP_400_BAD_REQUEST)
         if monto > pendiente:
-            monto = pendiente
+            return Response({'error': 'El monto no puede exceder el saldo pendiente.'}, status=status.HTTP_400_BAD_REQUEST)
 
         PagoTaller.objects.create(
             empresa=request.tenant,
@@ -375,6 +377,9 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         nuevo_pendiente = total - nuevo_pagado
         if nuevo_pendiente <= Decimal('0.00'):
             nuevo_pendiente = Decimal('0.00')
+            if presupuesto.estado == EstadoPresupuestoCita.APROBADO:
+                presupuesto.estado = EstadoPresupuestoCita.CERRADO
+                presupuesto.save(update_fields=['estado', 'updated_at'])
 
         registrar_evento_on_commit(
             empresa=request.tenant,
@@ -383,7 +388,7 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             entidad_tipo='PresupuestoCita',
             entidad_id=str(presupuesto.id),
             descripcion='Pago simulado registrado',
-            metadata={'porcentaje': str(porcentaje), 'monto': str(monto), 'pagado_total': str(nuevo_pagado)},
+            metadata={'monto': str(monto), 'pagado_total': str(nuevo_pagado)},
         )
 
         return Response(
@@ -392,6 +397,7 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
                 'monto_pagado': str(monto),
                 'pagado_total': str(nuevo_pagado),
                 'saldo_pendiente': str(nuevo_pendiente),
+                'pago_completo': nuevo_pendiente == Decimal('0.00'),
             },
             status=status.HTTP_200_OK
         )
@@ -445,6 +451,9 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         nuevo_pendiente = total - nuevo_pagado
         if nuevo_pendiente < Decimal('0.00'):
             nuevo_pendiente = Decimal('0.00')
+        if nuevo_pendiente == Decimal('0.00') and presupuesto.estado == EstadoPresupuestoCita.APROBADO:
+            presupuesto.estado = EstadoPresupuestoCita.CERRADO
+            presupuesto.save(update_fields=['estado', 'updated_at'])
 
         return Response(
             {
@@ -452,6 +461,7 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
                 'monto_pagado': str(monto),
                 'pagado_total': str(nuevo_pagado),
                 'saldo_pendiente': str(nuevo_pendiente),
+                'pago_completo': nuevo_pendiente == Decimal('0.00'),
             },
             status=status.HTTP_200_OK
         )

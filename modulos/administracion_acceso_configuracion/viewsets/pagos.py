@@ -1,5 +1,5 @@
-﻿"""ViewSet para manejar pagos con Stripe.
-Maneja la creaciÃ³n de Payment Intents y confirmaciÃ³n de pagos."""
+"""ViewSet para manejar pagos con Stripe.
+Maneja la creación de Payment Intents y confirmación de pagos."""
 import stripe
 import json
 import logging
@@ -44,9 +44,9 @@ class PagoViewSet(viewsets.ViewSet):
             "empresa_nombre": "Mi Empresa",
             "empresa_slug": "mi-empresa",
             "usuario_nombres": "Juan",
-            "usuario_apellidos": "PÃ©rez",
+            "usuario_apellidos": "Pérez",
             "usuario_email": "juan@empresa.com",
-            "usuario_password": "contraseÃ±a123",
+            "usuario_password": "contraseña123",
             "plan_id": "uuid-del-plan",
             "customer_email": "billing@empresa.com"  # Optional
         } """
@@ -68,15 +68,15 @@ class PagoViewSet(viewsets.ViewSet):
         )
         try:
             # En DESARROLLO: simular stripe sin llamar a la API
-            if settings.DEBUG:
+            if settings.STRIPE_SIMULATE:
                 # Crear Customer simulado
                 customer_id = f"cus_dev_{serializer.validated_data['empresa_slug'][:20]}"
                 # Crear Payment Intent simulado
                 payment_intent_id = f"pi_dev_{os.urandom(12).hex()}"
                 client_secret = f"pi_dev_{os.urandom(24).hex()}_secret_{os.urandom(12).hex()}"  
-                logger.info(f"DEBUG MODE: Simulando Stripe para {serializer.validated_data['empresa_slug']}")
+                logger.info(f"STRIPE_SIMULATE=True: Simulando Stripe para {serializer.validated_data['empresa_slug']}")
             else:
-                # En PRODUCCIÃ“N: usar Stripe real
+                # En PRODUCCIÓN: usar Stripe real
                 # Crear Customer en Stripe
                 customer = stripe.Customer.create(
                     email=customer_email,
@@ -89,10 +89,10 @@ class PagoViewSet(viewsets.ViewSet):
                 customer_id = customer.id
                 # Crear Payment Intent
                 payment_intent = stripe.PaymentIntent.create(
-                    amount=plan.precio_centavos,  # Ya estÃ¡ en centavos
+                    amount=plan.precio_centavos,  # Ya está en centavos
                     currency=settings.STRIPE_CURRENCY,
                     customer=customer.id,
-                    description=f"SuscripciÃ³n a {plan.nombre} - {serializer.validated_data['empresa_nombre']}",
+                    description=f"Suscripción a {plan.nombre} - {serializer.validated_data['empresa_nombre']}",
                     metadata={
                         'empresa_slug': serializer.validated_data['empresa_slug'],
                         'plan_id': str(plan.id),
@@ -102,7 +102,7 @@ class PagoViewSet(viewsets.ViewSet):
                 payment_intent_id = payment_intent.id
                 client_secret = payment_intent.client_secret
             # Crear registro de Pago en BD (estado PENDIENTE)
-            # Nota: usuario_password almacenarÃ¡ el hasheado (para compatibilidad con modelo Pago)
+            # Nota: usuario_password almacenará el hasheado (para compatibilidad con modelo Pago)
             pago = Pago.objects.create(
                 empresa_slug=serializer.validated_data['empresa_slug'],
                 empresa_nombre=serializer.validated_data['empresa_nombre'],
@@ -163,27 +163,27 @@ class PagoViewSet(viewsets.ViewSet):
                 estado='PENDIENTE'
             )
 
-            # En desarrollo, asumir que el pago es exitoso automÃ¡ticamente
-            # En producciÃ³n, verificar el estado en Stripe
-            if settings.DEBUG:
+            # En desarrollo, asumir que el pago es exitoso automáticamente
+            # En producción, verificar el estado en Stripe
+            if settings.STRIPE_SIMULATE:
                 # Modo desarrollo: asumir pago exitoso
                 payment_intent_status = 'succeeded'
             else:
-                # Modo producciÃ³n: verificar en Stripe
+                # Modo real: verificar en Stripe
                 payment_intent = stripe.PaymentIntent.retrieve(payment_intent_id)
                 payment_intent_status = payment_intent.status
             
             if payment_intent_status != 'succeeded':
                 return Response(
                     {
-                        'error': f'El pago aÃºn no estÃ¡ completado. Estado: {payment_intent_status}',
+                        'error': f'El pago aún no está completado. Estado: {payment_intent_status}',
                         'payment_intent_status': payment_intent_status
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            # Usar transacciÃ³n para garantizar consistencia
+            # Usar transacción para garantizar consistencia
             with transaction.atomic():
-                logger.info(f"Iniciando creaciÃ³n de empresa para pago: {payment_intent_id}")
+                logger.info(f"Iniciando creación de empresa para pago: {payment_intent_id}")
                 # 1. Crear Empresa
                 empresa = Empresa.objects.create(
                     nombre=pago.empresa_nombre,
@@ -192,7 +192,7 @@ class PagoViewSet(viewsets.ViewSet):
                     suscripcion_hasta=timezone.now() + timedelta(days=pago.plan.duracion_dias)
                 )
                 logger.info(f"Empresa creada: {empresa.id} - {empresa.slug}")
-                # 2. Crear Usuario principal (sin rol aÃºn)
+                # 2. Crear Usuario principal (sin rol aún)
                 usuario_admin = Usuario(
                     empresa=empresa,
                     email=pago.usuario_email,
@@ -203,13 +203,13 @@ class PagoViewSet(viewsets.ViewSet):
                 )
                 usuario_admin.save()
                 logger.info(f"Usuario creado: {usuario_admin.id} - {usuario_admin.email}")
-                # 3. Configurar automÃ¡ticamente los 4 roles base y asignar ADMIN al usuario
+                # 3. Configurar automáticamente los 4 roles base y asignar ADMIN al usuario
                 setup_resultado = setup_empresa_nueva(empresa, usuario_admin)
                 logger.info(f"Setup resultado: {setup_resultado}")
                 if not setup_resultado['exito']:
-                    # Si falla la configuraciÃ³n de roles, lanzar excepciÃ³n para revertir transacciÃ³n
+                    # Si falla la configuración de roles, lanzar excepción para revertir transacción
                     raise Exception(f"Error al configurar roles: {setup_resultado.get('error', 'Desconocido')}")
-                # 4. Crear SuscripciÃ³n
+                # 4. Crear Suscripción
                 inicio = timezone.now()
                 fin = inicio + timedelta(days=pago.plan.duracion_dias)
                 suscripcion = Suscripcion.objects.create(
@@ -220,14 +220,14 @@ class PagoViewSet(viewsets.ViewSet):
                     estado='ACTIVA',
                     referencia_pago=payment_intent_id
                 )
-                logger.info(f"SuscripciÃ³n creada: {suscripcion.id}")
+                logger.info(f"Suscripción creada: {suscripcion.id}")
                 # 5. Marcar pago como completado
                 pago.estado = 'COMPLETADO'
                 pago.empresa = empresa
                 pago.processed_at = timezone.now()
                 pago.save()
                 logger.info(f"Pago marcado como completado")
-                # AuditorÃ­a: registro de empresa confirmado
+                # Auditoría: registro de empresa confirmado
                 registrar_evento_on_commit(
                     empresa=empresa,
                     accion=AccionAuditoria.REGISTRO_EMPRESA_CONFIRMADO,
@@ -244,7 +244,7 @@ class PagoViewSet(viewsets.ViewSet):
                         "plan_nombre": pago.plan.nombre,
                     }
                 )
-                # AuditorÃ­a: empresa registrada
+                # Auditoría: empresa registrada
                 registrar_evento_on_commit(
                     empresa=empresa,
                     accion=AccionAuditoria.EMPRESA_REGISTRADA,
@@ -259,14 +259,14 @@ class PagoViewSet(viewsets.ViewSet):
                         "usuario_admin_email": usuario_admin.email,
                     }
                 )  
-                # AuditorÃ­a: suscripciÃ³n inicial activada
+                # Auditoría: suscripción inicial activada
                 registrar_evento_on_commit(
                     empresa=empresa,
                     accion=AccionAuditoria.SUSCRIPCION_INICIAL_ACTIVADA,
                     usuario=usuario_admin,
                     entidad_tipo="Suscripcion",
                     entidad_id=suscripcion.id,
-                    descripcion=f"SuscripciÃ³n inicial activada: {pago.plan.nombre}",
+                    descripcion=f"Suscripción inicial activada: {pago.plan.nombre}",
                     metadata={
                         "plan_id": str(pago.plan.id),
                         "plan_nombre": pago.plan.nombre,
@@ -350,4 +350,5 @@ class PagoViewSet(viewsets.ViewSet):
         else:
             ip = request.META.get('REMOTE_ADDR')
         return ip
+
 

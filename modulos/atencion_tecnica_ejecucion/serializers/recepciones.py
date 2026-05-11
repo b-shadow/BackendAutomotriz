@@ -241,12 +241,17 @@ class RecepcionVehiculoCreacionSerializer(serializers.ModelSerializer):
         ])
 
         # CU-23: al recepcionar, generar OT automaticamente en estado ABIERTA.
-        OrdenTrabajoService.crear_orden_automatica(
-            empresa=cita.empresa,
-            cita=cita,
-            asesor_responsable=request.user,
-            observaciones="OT generada automaticamente al registrar recepcion.",
-        )
+        try:
+            OrdenTrabajoService.crear_orden_automatica(
+                empresa=cita.empresa,
+                cita=cita,
+                asesor_responsable=request.user,
+                observaciones="OT generada automaticamente al registrar recepcion.",
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError(
+                {"detalle": f"No se pudo registrar la recepción: {str(exc)}"}
+            ) from exc
 
         # CU-22: al recepcionar, generar presupuesto BORRADOR automaticamente si no existe.
         if not hasattr(cita, "presupuesto"):

@@ -25,7 +25,7 @@ class CategoriaInventarioSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "empresa", "created_at", "updated_at"]
 
 
 class ItemInventarioSerializer(serializers.ModelSerializer):
@@ -55,7 +55,7 @@ class ItemInventarioSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "empresa", "created_at", "updated_at"]
 
 
 class ProveedorSerializer(serializers.ModelSerializer):

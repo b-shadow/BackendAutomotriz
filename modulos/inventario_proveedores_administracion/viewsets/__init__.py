@@ -11,10 +11,26 @@ from modulos.inventario_proveedores_administracion.viewsets.inventario import (
     MovimientoInventarioViewSet,
     SolicitudRepuestoViewSet,
 )
+from modulos.inventario_proveedores_administracion.viewsets.administrativo import (
+    ProveedorViewSet,
+    CompraViewSet,
+    VentaMostradorViewSet,
+    PagoTallerViewSet,
+    FacturaViewSet,
+    CajaUsuarioViewSet,
+    MovimientoCajaViewSet,
+)
 
 __all__ = [
     "CategoriaInventarioViewSet",
     "ItemInventarioViewSet",
     "MovimientoInventarioViewSet",
     "SolicitudRepuestoViewSet",
+    "ProveedorViewSet",
+    "CompraViewSet",
+    "VentaMostradorViewSet",
+    "PagoTallerViewSet",
+    "FacturaViewSet",
+    "CajaUsuarioViewSet",
+    "MovimientoCajaViewSet",
 ]

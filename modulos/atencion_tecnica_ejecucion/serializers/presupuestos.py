@@ -9,6 +9,12 @@ from modulos.atencion_tecnica_ejecucion.models import (
 )
 from modulos.inventario_proveedores_administracion.models import PagoTaller, EstadoPagoTaller
 
+ESTADOS_PAGO_CONFIRMADOS = [
+    EstadoPagoTaller.CONFIRMADO,
+    EstadoPagoTaller.RECIBIDO,
+    EstadoPagoTaller.FACTURADO,
+]
+
 
 class PresupuestoDetalleSerializer(serializers.ModelSerializer):
     """Serializer base para Detalle de Presupuesto."""
@@ -73,7 +79,8 @@ class PresupuestoCitaSerializer(serializers.ModelSerializer):
         for p in PagoTaller.objects.filter(
             empresa=obj.empresa,
             cita=obj.cita,
-        ).exclude(estado=EstadoPagoTaller.ANULADO):
+            estado__in=ESTADOS_PAGO_CONFIRMADOS,
+        ):
             total += p.monto_total or Decimal("0.00")
         return total
 

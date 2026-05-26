@@ -1,7 +1,12 @@
 ﻿from decimal import Decimal
 
+import stripe
 from django.db import transaction
 from django.utils import timezone
+from django.conf import settings
+from django.utils.dateparse import parse_datetime
+from datetime import timedelta
+from urllib.parse import quote
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -18,15 +23,31 @@ from modulos.atencion_tecnica_ejecucion.serializers.presupuestos import (
     PresupuestoCitaSerializer,
 )
 from modulos.inventario_proveedores_administracion.models import (
+    CajaUsuario,
     PagoTaller,
+    MovimientoCaja,
+    TipoMovimientoCaja,
     TipoOrigenPagoTaller,
     EstadoPagoTaller,
+)
+from modulos.inventario_proveedores_administracion.services.pagos_qr import (
+    LibelulaPaymentClient,
+    PagoQRError,
+    calcular_monto_cobrado,
+    generar_referencia_externa,
+    validar_monto_real,
 )
 from modulos.vehiculos_servicios_plan_citas.models import Cita
 from modulos.administracion_acceso_configuracion.services.auditoria_service import (
     registrar_evento_on_commit,
     AccionAuditoria,
 )
+
+ESTADOS_PAGO_CONFIRMADOS = [
+    EstadoPagoTaller.CONFIRMADO,
+    EstadoPagoTaller.RECIBIDO,
+    EstadoPagoTaller.FACTURADO,
+]
 
 
 class IsAuthenticatedTenant(permissions.BasePermission):
@@ -68,7 +89,7 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             return [IsAuthenticatedTenant()]
         if self.action in ['aprobar', 'rechazar']:
             return [IsAuthenticatedTenant()]
-        if self.action in ['simular_pago']:
+        if self.action in ['simular_pago', 'iniciar_pago_qr', 'iniciar_pago_tarjeta', 'confirmar_pago_tarjeta']:
             return [IsAuthenticatedTenant()]
         if self.action in ['marcar_pagado']:
             return [IsAuthenticatedTenant(), PuedeRegistrarPagos()]
@@ -107,9 +128,28 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         for p in PagoTaller.objects.filter(
             empresa=presupuesto.empresa,
             cita=presupuesto.cita,
-        ).exclude(estado=EstadoPagoTaller.ANULADO):
+            estado__in=ESTADOS_PAGO_CONFIRMADOS,
+        ):
             monto += p.monto_total or Decimal('0.00')
         return monto
+
+    def _registrar_movimiento_caja_si_aplica(self, request, pago):
+        caja = CajaUsuario.objects.filter(
+            empresa=request.tenant,
+            administrativo=request.user,
+            activa=True,
+        ).first()
+        if not caja:
+            return
+        MovimientoCaja.objects.create(
+            empresa=request.tenant,
+            caja=caja,
+            tipo=TipoMovimientoCaja.INGRESO,
+            concepto=f'Pago presupuesto {pago.id}',
+            monto=pago.monto_total,
+            pago_taller=pago,
+            registrado_por=request.user,
+        )
 
     def _validar_detalle(self, detalle):
         cantidad = int(detalle.get('cantidad', 1))
@@ -332,6 +372,122 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Solo se puede cerrar un presupuesto APROBADO.'}, status=status.HTTP_400_BAD_REQUEST)
         return self._cambiar_estado(presupuesto, EstadoPresupuestoCita.CERRADO, request)
 
+    @action(detail=True, methods=['post'], url_path='iniciar-pago-qr')
+    @transaction.atomic
+    def iniciar_pago_qr(self, request, pk=None, **kwargs):
+        presupuesto = self.get_object()
+        rol_nombre = request.user.rol.nombre if request.user.rol else None
+        if rol_nombre == 'USUARIO' and presupuesto.cita.cliente_id != request.user.id:
+            return Response({'error': 'No autorizado para pagar este presupuesto.'}, status=status.HTTP_403_FORBIDDEN)
+
+        total = presupuesto.total or Decimal('0.00')
+        pagado_actual = self._monto_pagado(presupuesto)
+        pendiente = total - pagado_actual
+        if pendiente <= Decimal('0.00'):
+            return Response({'error': 'Este presupuesto ya esta pagado al 100%.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        monto_raw = request.data.get('monto')
+        if monto_raw in [None, ""]:
+            return Response({'error': 'Debe enviar el monto a pagar.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            monto_real = Decimal(str(monto_raw)).quantize(Decimal('0.01'))
+        except Exception:
+            return Response({'error': 'Monto invalido.'}, status=status.HTTP_400_BAD_REQUEST)
+        if monto_real <= Decimal('0.00'):
+            return Response({'error': 'Monto de pago invalido.'}, status=status.HTTP_400_BAD_REQUEST)
+        if monto_real > pendiente:
+            return Response({'error': 'El monto no puede exceder el saldo pendiente.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        fecha_expiracion = parse_datetime(request.data.get('fecha_expiracion') or '')
+        if not fecha_expiracion:
+            fecha_expiracion = timezone.now() + timedelta(minutes=30)
+        if fecha_expiracion <= timezone.now():
+            return Response({'error': 'fecha_expiracion debe ser futura.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ambiente = getattr(settings, 'PAGOS_MODO', 'PRUEBA_REAL').upper()
+        try:
+            validar_monto_real(monto_real)
+            monto_cobrado = calcular_monto_cobrado(monto_real, ambiente)
+            if getattr(settings, 'PAGOS_QR_SIMULADO', True):
+                monto_cobrado = monto_real
+            referencia_externa = generar_referencia_externa(ambiente, 'PRESUPUESTO', str(presupuesto.id))
+            codigo_pago = f'PAGO-{timezone.now().strftime("%Y%m%d%H%M%S")}-{str(presupuesto.id)[:6].upper()}'
+            pago = PagoTaller.objects.create(
+                empresa=request.tenant,
+                tipo_origen=TipoOrigenPagoTaller.CITA,
+                cita=presupuesto.cita,
+                tipo_destino='PRESUPUESTO',
+                id_destino=str(presupuesto.id),
+                estado=EstadoPagoTaller.PENDIENTE,
+                proveedor='LIBELULA_QR',
+                ambiente=ambiente,
+                codigo_pago=codigo_pago,
+                monto_total=monto_real,
+                monto_real=monto_real,
+                monto_cobrado=monto_cobrado,
+                metodo_pago='QR',
+                moneda='BOB',
+                referencia=referencia_externa,
+                referencia_externa=referencia_externa,
+                descripcion=request.data.get('descripcion') or f'Pago presupuesto {presupuesto.id}',
+                fecha_expiracion=fecha_expiracion,
+                registrado_por=request.user,
+            )
+            if getattr(settings, 'PAGOS_QR_SIMULADO', True):
+                token_simulador = timezone.now().strftime('%f') + str(pago.id).replace('-', '')[:16]
+                frontend_base = (getattr(settings, 'PAGOS_SIMULADOR_FRONTEND_URL', '') or 'http://localhost:5173').rstrip('/')
+                url_simulada = f'{frontend_base}/pagos/simulador/{pago.codigo_pago}/{token_simulador}'
+                pago.url_pago = url_simulada
+                pago.qr_imagen_url = f'https://api.qrserver.com/v1/create-qr-code/?size=280x280&data={quote(url_simulada)}'
+                pago.qr_payload = {'url': url_simulada}
+                pago.metadata = {'simulado': True, 'sim_token': token_simulador}
+                pago.respuesta_proveedor_raw = {'simulado': True, 'url_pago': url_simulada}
+                pago.save(update_fields=['url_pago', 'qr_imagen_url', 'qr_payload', 'metadata', 'respuesta_proveedor_raw', 'updated_at'])
+            else:
+                libelula = LibelulaPaymentClient()
+                callback_url = getattr(settings, 'PAGOS_CALLBACK_URL', '')
+                return_url = getattr(settings, 'PAGOS_RETURN_URL', '')
+                resp = libelula.crear_cobro(
+                    monto_cobrado=monto_cobrado,
+                    moneda='BOB',
+                    descripcion=pago.descripcion,
+                    referencia_externa=referencia_externa,
+                    fecha_expiracion=fecha_expiracion,
+                    callback_url=callback_url,
+                    return_url=return_url,
+                )
+                pago.id_pago_proveedor = resp.id_pago_proveedor
+                pago.id_transaccion_proveedor = resp.id_transaccion_proveedor
+                pago.qr_imagen_url = resp.qr_imagen_url
+                pago.qr_imagen_base64 = resp.qr_imagen_base64
+                pago.url_pago = resp.url_pago
+                pago.qr_payload = resp.qr_payload
+                pago.respuesta_proveedor_raw = resp.raw
+                pago.save(update_fields=[
+                    'id_pago_proveedor', 'id_transaccion_proveedor', 'qr_imagen_url', 'qr_imagen_base64',
+                    'url_pago', 'qr_payload', 'respuesta_proveedor_raw', 'updated_at'
+                ])
+            return Response({
+                'codigoPago': pago.codigo_pago,
+                'pagoId': str(pago.id),
+                'estado': pago.estado,
+                'proveedor': pago.proveedor,
+                'ambiente': pago.ambiente,
+                'tipoDestino': pago.tipo_destino,
+                'idDestino': pago.id_destino,
+                'montoReal': str(pago.monto_real),
+                'montoCobrado': str(pago.monto_cobrado),
+                'moneda': pago.moneda,
+                'descripcion': pago.descripcion,
+                'fechaExpiracion': pago.fecha_expiracion.isoformat() if pago.fecha_expiracion else None,
+                'qrImagenUrl': pago.qr_imagen_url,
+                'qrImagenBase64': pago.qr_imagen_base64,
+                'urlPago': pago.url_pago,
+                'simulado': bool((pago.metadata or {}).get('simulado')),
+            }, status=status.HTTP_201_CREATED)
+        except PagoQRError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
     @action(detail=True, methods=['post'], url_path='simular-pago')
     @transaction.atomic
     def simular_pago(self, request, pk=None, **kwargs):
@@ -359,19 +515,29 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Monto de pago invalido.'}, status=status.HTTP_400_BAD_REQUEST)
         if monto > pendiente:
             return Response({'error': 'El monto no puede exceder el saldo pendiente.'}, status=status.HTTP_400_BAD_REQUEST)
+        metodo_pago = (request.data.get('metodo_pago') or 'TARJETA').upper()
+        if metodo_pago not in ['TARJETA', 'QR']:
+            return Response({'error': 'Metodo de pago invalido para cliente.'}, status=status.HTTP_400_BAD_REQUEST)
+        if metodo_pago == 'QR':
+            return Response({'error': 'Para QR utiliza el endpoint iniciar-pago-qr.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        PagoTaller.objects.create(
+        pago = PagoTaller.objects.create(
             empresa=request.tenant,
             tipo_origen=TipoOrigenPagoTaller.CITA,
             cita=presupuesto.cita,
-            estado=EstadoPagoTaller.RECIBIDO,
+            estado=EstadoPagoTaller.CONFIRMADO,
             monto_total=monto,
-            metodo_pago='SIMULADO',
+            monto_real=monto,
+            monto_cobrado=monto,
+            monto_pagado=monto,
+            metodo_pago=metodo_pago,
             moneda='BOB',
             referencia=f'SIM-{timezone.now().strftime("%Y%m%d%H%M%S")}',
             registrado_por=request.user,
             recibido_at=timezone.now(),
+            fecha_pago=timezone.now(),
         )
+        self._registrar_movimiento_caja_si_aplica(request, pago)
 
         nuevo_pagado = self._monto_pagado(presupuesto)
         nuevo_pendiente = total - nuevo_pagado
@@ -423,19 +589,27 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             return Response({'error': 'El monto debe ser mayor que 0.'}, status=status.HTTP_400_BAD_REQUEST)
         if monto > pendiente:
             return Response({'error': 'El monto no puede exceder el saldo pendiente.'}, status=status.HTTP_400_BAD_REQUEST)
+        metodo_pago = (request.data.get('metodo_pago') or 'EFECTIVO').upper()
+        if metodo_pago != 'EFECTIVO':
+            return Response({'error': 'Solo EFECTIVO se registra de forma inmediata. QR/TARJETA siguen su flujo de confirmacion.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        PagoTaller.objects.create(
+        pago = PagoTaller.objects.create(
             empresa=request.tenant,
             tipo_origen=TipoOrigenPagoTaller.CITA,
             cita=presupuesto.cita,
-            estado=EstadoPagoTaller.RECIBIDO,
+            estado=EstadoPagoTaller.CONFIRMADO,
             monto_total=monto,
-            metodo_pago='EFECTIVO',
+            metodo_pago=metodo_pago,
             moneda='BOB',
-            referencia=f'EFEC-{timezone.now().strftime("%Y%m%d%H%M%S")}',
+            referencia=f'{metodo_pago[:4]}-{timezone.now().strftime("%Y%m%d%H%M%S")}',
             registrado_por=request.user,
             recibido_at=timezone.now(),
+            fecha_pago=timezone.now(),
+            monto_real=monto,
+            monto_cobrado=monto,
+            monto_pagado=monto,
         )
+        self._registrar_movimiento_caja_si_aplica(request, pago)
 
         registrar_evento_on_commit(
             empresa=request.tenant,
@@ -465,4 +639,165 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK
         )
+
+    @action(detail=True, methods=['post'], url_path='iniciar-pago-tarjeta')
+    @transaction.atomic
+    def iniciar_pago_tarjeta(self, request, pk=None, **kwargs):
+        presupuesto = self.get_object()
+        total = presupuesto.total or Decimal('0.00')
+        pagado_actual = self._monto_pagado(presupuesto)
+        pendiente = total - pagado_actual
+        if pendiente <= Decimal('0.00'):
+            return Response({'error': 'Este presupuesto ya esta pagado al 100%.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        monto_raw = request.data.get('monto')
+        if monto_raw in [None, ""]:
+            return Response({'error': 'Debe enviar el monto a pagar.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            monto_real = Decimal(str(monto_raw)).quantize(Decimal('0.01'))
+        except Exception:
+            return Response({'error': 'Monto invalido.'}, status=status.HTTP_400_BAD_REQUEST)
+        if monto_real <= Decimal('0.00'):
+            return Response({'error': 'Monto de pago invalido.'}, status=status.HTTP_400_BAD_REQUEST)
+        if monto_real > pendiente:
+            return Response({'error': 'El monto no puede exceder el saldo pendiente.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        codigo_pago = f'STR-{timezone.now().strftime("%Y%m%d%H%M%S")}-{str(presupuesto.id)[:6].upper()}'
+        pago = PagoTaller.objects.create(
+            empresa=request.tenant,
+            tipo_origen=TipoOrigenPagoTaller.CITA,
+            cita=presupuesto.cita,
+            tipo_destino='PRESUPUESTO',
+            id_destino=str(presupuesto.id),
+            estado=EstadoPagoTaller.PENDIENTE,
+            proveedor='STRIPE',
+            ambiente='TEST' if settings.STRIPE_MODE == 'test' else 'LIVE',
+            codigo_pago=codigo_pago,
+            monto_total=monto_real,
+            monto_real=monto_real,
+            monto_cobrado=monto_real,
+            metodo_pago='TARJETA',
+            moneda='BOB',
+            referencia=f'STRIPE-{codigo_pago}',
+            referencia_externa=f'STRIPE-{codigo_pago}',
+            descripcion=request.data.get('descripcion') or f'Pago tarjeta presupuesto {presupuesto.id}',
+            registrado_por=request.user,
+        )
+
+        frontend_base = (request.headers.get('Origin') or getattr(settings, 'PAGOS_RETURN_URL', '') or 'http://localhost:5173').rstrip('/')
+        success_url = (
+            f"{frontend_base}/{request.tenant.slug}/app"
+            f"?stripe_result=success&presupuesto_id={presupuesto.id}&pago_taller_id={pago.id}&session_id={{CHECKOUT_SESSION_ID}}"
+        )
+        cancel_url = (
+            f"{frontend_base}/{request.tenant.slug}/app"
+            f"?stripe_result=cancel&presupuesto_id={presupuesto.id}&pago_taller_id={pago.id}"
+        )
+
+        try:
+            currency = (getattr(settings, 'STRIPE_CURRENCY', 'usd') or 'usd').lower()
+            session = stripe.checkout.Session.create(
+                mode='payment',
+                payment_method_types=['card'],
+                line_items=[
+                    {
+                        'price_data': {
+                            'currency': currency,
+                            'product_data': {'name': pago.descripcion},
+                            'unit_amount': int((monto_real * Decimal('100')).quantize(Decimal('1'))),
+                        },
+                        'quantity': 1,
+                    }
+                ],
+                metadata={
+                    'pago_taller_id': str(pago.id),
+                    'presupuesto_id': str(presupuesto.id),
+                    'tenant_slug': request.tenant.slug,
+                },
+                success_url=success_url,
+                cancel_url=cancel_url,
+            )
+        except Exception as exc:
+            pago.estado = EstadoPagoTaller.ERROR
+            pago.metadata = {'stripe_error': str(exc)}
+            pago.save(update_fields=['estado', 'metadata', 'updated_at'])
+            return Response({'error': f'No se pudo iniciar pago con Stripe: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        pago.id_pago_proveedor = session.id
+        pago.url_pago = session.url
+        pago.respuesta_proveedor_raw = {'checkout_session_id': session.id}
+        pago.save(update_fields=['id_pago_proveedor', 'url_pago', 'respuesta_proveedor_raw', 'updated_at'])
+
+        return Response(
+            {
+                'pagoId': str(pago.id),
+                'checkoutUrl': session.url,
+                'sessionId': session.id,
+                'estado': pago.estado,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=['post'], url_path='confirmar-pago-tarjeta')
+    @transaction.atomic
+    def confirmar_pago_tarjeta(self, request, pk=None, **kwargs):
+        presupuesto = self.get_object()
+        pago_taller_id = request.data.get('pago_taller_id')
+        session_id = request.data.get('session_id')
+        if not pago_taller_id or not session_id:
+            return Response({'error': 'pago_taller_id y session_id son requeridos.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            pago = PagoTaller.objects.get(
+                id=pago_taller_id,
+                empresa=request.tenant,
+                cita=presupuesto.cita,
+                tipo_destino='PRESUPUESTO',
+                id_destino=str(presupuesto.id),
+                metodo_pago='TARJETA',
+            )
+        except PagoTaller.DoesNotExist:
+            return Response({'error': 'Pago de tarjeta no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if pago.estado == EstadoPagoTaller.CONFIRMADO:
+            return Response({'ok': True, 'estado': pago.estado}, status=status.HTTP_200_OK)
+        if pago.estado in [EstadoPagoTaller.CANCELADO, EstadoPagoTaller.VENCIDO, EstadoPagoTaller.ANULADO]:
+            return Response({'error': f'El pago no puede confirmarse en estado {pago.estado}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+        except Exception as exc:
+            return Response({'error': f'No se pudo consultar Stripe: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if session.id != pago.id_pago_proveedor:
+            return Response({'error': 'La sesion de Stripe no coincide con el pago.'}, status=status.HTTP_400_BAD_REQUEST)
+        if session.payment_status != 'paid':
+            return Response({'error': f'El pago no esta confirmado en Stripe. Estado: {session.payment_status}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        pago.estado = EstadoPagoTaller.CONFIRMADO
+        pago.monto_pagado = pago.monto_total
+        pago.fecha_pago = timezone.now()
+        pago.recibido_at = pago.fecha_pago
+        pago.save(update_fields=['estado', 'monto_pagado', 'fecha_pago', 'recibido_at', 'updated_at'])
+        self._registrar_movimiento_caja_si_aplica(request, pago)
+
+        nuevo_pagado = self._monto_pagado(presupuesto)
+        nuevo_pendiente = (presupuesto.total or Decimal('0.00')) - nuevo_pagado
+        if nuevo_pendiente < Decimal('0.00'):
+            nuevo_pendiente = Decimal('0.00')
+        if nuevo_pendiente == Decimal('0.00') and presupuesto.estado == EstadoPresupuestoCita.APROBADO:
+            presupuesto.estado = EstadoPresupuestoCita.CERRADO
+            presupuesto.save(update_fields=['estado', 'updated_at'])
+
+        return Response(
+            {
+                'ok': True,
+                'estado': pago.estado,
+                'pagado_total': str(nuevo_pagado),
+                'saldo_pendiente': str(nuevo_pendiente),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 

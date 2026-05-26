@@ -73,9 +73,17 @@ class TipoOrigenPagoTaller(models.TextChoices):
 class EstadoPagoTaller(models.TextChoices):
     """Estados de un pago de taller."""
     PENDIENTE = "PENDIENTE", _("Pendiente")
+    CONFIRMADO = "CONFIRMADO", _("Confirmado")
+    FALLIDO = "FALLIDO", _("Fallido")
+    VENCIDO = "VENCIDO", _("Vencido")
+    CANCELADO = "CANCELADO", _("Cancelado")
+    PROCESANDO = "PROCESANDO", _("Procesando")
+    RECHAZADO = "RECHAZADO", _("Rechazado")
+    MONTO_INCORRECTO = "MONTO_INCORRECTO", _("Monto incorrecto")
+    ERROR = "ERROR", _("Error")
+    FACTURADO = "FACTURADO", _("Facturado")
     REGISTRADO = "REGISTRADO", _("Registrado")
     RECIBIDO = "RECIBIDO", _("Recibido")
-    FACTURADO = "FACTURADO", _("Facturado")
     ANULADO = "ANULADO", _("Anulado")
 
 
@@ -772,6 +780,11 @@ class PagoTaller(models.Model):
         related_name="pagos_taller",
         verbose_name=_("venta"),
     )
+    codigo_pago = models.CharField(_("codigo pago"), max_length=64, null=True, blank=True, db_index=True)
+    proveedor = models.CharField(_("proveedor"), max_length=32, default="LIBELULA_QR", db_index=True)
+    ambiente = models.CharField(_("ambiente"), max_length=20, default="PRUEBA_REAL", db_index=True)
+    tipo_destino = models.CharField(_("tipo destino"), max_length=40, default="CITA", db_index=True)
+    id_destino = models.CharField(_("id destino"), max_length=64, null=True, blank=True, db_index=True)
     estado = models.CharField(
         _("estado"),
         max_length=20,
@@ -784,6 +797,9 @@ class PagoTaller(models.Model):
         max_digits=12,
         decimal_places=2,
     )
+    monto_real = models.DecimalField(_("monto real"), max_digits=12, decimal_places=2, default=0)
+    monto_cobrado = models.DecimalField(_("monto cobrado"), max_digits=12, decimal_places=2, default=0)
+    monto_pagado = models.DecimalField(_("monto pagado"), max_digits=12, decimal_places=2, null=True, blank=True)
     metodo_pago = models.CharField(
         _("método de pago"),
         max_length=50,
@@ -801,6 +817,20 @@ class PagoTaller(models.Model):
         blank=True,
         help_text="Referencia del pago (número de transacción, etc)"
     )
+    descripcion = models.CharField(_("descripcion"), max_length=255, null=True, blank=True)
+    qr_payload = models.JSONField(_("qr payload"), null=True, blank=True)
+    qr_imagen_url = models.CharField(_("qr imagen url"), max_length=500, null=True, blank=True)
+    qr_imagen_base64 = models.TextField(_("qr imagen base64"), null=True, blank=True)
+    url_pago = models.CharField(_("url pago"), max_length=500, null=True, blank=True)
+    referencia_externa = models.CharField(_("referencia externa"), max_length=120, null=True, blank=True, db_index=True)
+    id_pago_proveedor = models.CharField(_("id pago proveedor"), max_length=120, null=True, blank=True, db_index=True)
+    id_transaccion_proveedor = models.CharField(_("id transaccion proveedor"), max_length=120, null=True, blank=True)
+    fecha_expiracion = models.DateTimeField(_("fecha expiracion"), null=True, blank=True, db_index=True)
+    fecha_pago = models.DateTimeField(_("fecha pago"), null=True, blank=True)
+    metadata = models.JSONField(_("metadata"), null=True, blank=True)
+    respuesta_proveedor_raw = models.JSONField(_("respuesta proveedor raw"), null=True, blank=True)
+    callback_ultimo_hash = models.CharField(_("callback hash"), max_length=128, null=True, blank=True)
+    callback_intentos = models.IntegerField(_("intentos callback"), default=0)
     registrado_por = models.ForeignKey(
         Usuario,
         on_delete=models.SET_NULL,
@@ -1005,4 +1035,3 @@ class MovimientoCaja(models.Model):
 
     def __str__(self):
         return f"{self.tipo} - ${self.monto}"
-

@@ -96,11 +96,12 @@ WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
 # === DATABASE (Neon PostgreSQL) ===
-# Primero intenta leer DATABASE_URL; si no existe, usa configuración de desarrollo
-if "DATABASE_URL" in os.environ:
+# Prioriza DATABASE_URL para mantener compatibilidad con Neon.
+DATABASE_URL = env("DATABASE_URL", default="").strip()
+if DATABASE_URL:
     DATABASES = {
-        "default": dj_database_url.config(
-            default=os.environ.get("DATABASE_URL"),
+        "default": dj_database_url.parse(
+            DATABASE_URL,
             conn_max_age=600,
             conn_health_checks=True,
         )
@@ -284,6 +285,26 @@ STRIPE_CURRENCY = env("STRIPE_CURRENCY", default="usd").lower()
 STRIPE_SUCCESS_URL = env("STRIPE_SUCCESS_URL", default="http://localhost:3000/success")
 STRIPE_CANCEL_URL = env("STRIPE_CANCEL_URL", default="http://localhost:3000/cancel")
 STRIPE_WEBHOOK_URL = env("STRIPE_WEBHOOK_URL", default="/api/webhooks/stripe/")
+
+# === PAGOS QR (LIBELULA / pagos.bo) ===
+PAGOS_PROVEEDOR = env("PAGOS_PROVEEDOR", default="LIBELULA_QR")
+PAGOS_MODO = env("PAGOS_MODO", default="PRUEBA_REAL").upper()
+PAGOS_MONEDA = env("PAGOS_MONEDA", default="BOB").upper()
+PAGOS_DIVISOR_PRUEBA = env.int("PAGOS_DIVISOR_PRUEBA", default=1000)
+PAGOS_MONTO_REAL_MINIMO = env.int("PAGOS_MONTO_REAL_MINIMO", default=10)
+PAGOS_MONTO_REAL_MULTIPLO = env.int("PAGOS_MONTO_REAL_MULTIPLO", default=10)
+PAGOS_CALLBACK_URL = env("PAGOS_CALLBACK_URL", default="")
+PAGOS_RETURN_URL = env("PAGOS_RETURN_URL", default="")
+PAGOS_QR_SIMULADO = env.bool("PAGOS_QR_SIMULADO", default=True)
+PAGOS_SIMULADOR_FRONTEND_URL = env("PAGOS_SIMULADOR_FRONTEND_URL", default="http://localhost:5173")
+
+LIBELULA_BASE_URL = env("LIBELULA_BASE_URL", default="")
+LIBELULA_API_KEY = env("LIBELULA_API_KEY", default="")
+LIBELULA_API_SECRET = env("LIBELULA_API_SECRET", default="")
+LIBELULA_CREATE_PATH = env("LIBELULA_CREATE_PATH", default="/payments")
+LIBELULA_STATUS_PATH = env("LIBELULA_STATUS_PATH", default="/payments/{id}")
+LIBELULA_TIMEOUT_SECONDS = env.int("LIBELULA_TIMEOUT_SECONDS", default=20)
+LIBELULA_CALLBACK_TOKEN = env("LIBELULA_CALLBACK_TOKEN", default="")
 
 # === REDIS (opcional para Celery) ===
 REDIS_URL = env("REDIS_URL", default="redis://localhost:6379/0")

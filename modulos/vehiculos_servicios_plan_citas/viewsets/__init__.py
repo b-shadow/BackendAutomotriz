@@ -9,7 +9,6 @@ from modulos.vehiculos_servicios_plan_citas.viewsets.servicios import ServiciosC
 from modulos.vehiculos_servicios_plan_citas.viewsets.espacios import EspaciosTrabajoViewSet
 from modulos.vehiculos_servicios_plan_citas.viewsets.planes_vehiculo import PlanesVehiculoViewSet
 from modulos.vehiculos_servicios_plan_citas.viewsets.citas import CitasViewSet
-from modulos.vehiculos_servicios_plan_citas.viewsets.reportes_viewsets import ReportesViewSet
 
 __all__ = [
     "VehiculosViewSet",
@@ -17,5 +16,4 @@ __all__ = [
     "EspaciosTrabajoViewSet",
     "PlanesVehiculoViewSet",
     "CitasViewSet",
-    "ReportesViewSet",
 ]

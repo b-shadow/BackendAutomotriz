@@ -135,6 +135,8 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
             return [IsAuthenticatedTenant(), PuedeGestionarInventario()]
         if self.action in ["en_proceso_almacen", "marcar_entregada"]:
             return [IsAuthenticatedTenant(), PuedeGestionarInventario()]
+        if self.action in ["asignar_proveedor_eta"]:
+            return [IsAuthenticatedTenant(), PuedeGestionarInventario()]
         if self.action in ["marcar_recibida_taller"]:
             return [IsAuthenticatedTenant()]
         return [IsAuthenticatedTenant()]
@@ -307,6 +309,23 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
                 ]
             )
 
+        return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="asignar-proveedor-eta")
+    @transaction.atomic
+    def asignar_proveedor_eta(self, request, pk=None, **kwargs):
+        solicitud = self.get_object()
+        proveedor_id = request.data.get("proveedor_id")
+        eta = request.data.get("eta")
+        observaciones = request.data.get("observaciones", "")
+        if not proveedor_id:
+            return Response({"error": "proveedor_id es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+        solicitud.estado = EstadoSolicitudRepuesto.EN_REVISION_ALMACEN
+        solicitud.observaciones_almacen = (
+            f"PROVEEDOR:{proveedor_id};ETA:{eta or ''};OBS:{observaciones or ''}"
+        )
+        solicitud.save(update_fields=["estado", "observaciones_almacen", "updated_at"])
         return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_200_OK)
 
 

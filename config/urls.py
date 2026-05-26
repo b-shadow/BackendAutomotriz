@@ -34,6 +34,10 @@ from modulos.administracion_acceso_configuracion.viewsets import (
     tenant_login,
     tenant_logout,
 )
+from modulos.inventario_proveedores_administracion.viewsets.administrativo import (
+    LibelulaWebhookGlobalView,
+    PagoQRSimuladorPublicView,
+)
 
 # Router para endpoints globales
 global_router = DefaultRouter()
@@ -82,6 +86,16 @@ urlpatterns = [
     # ========== ENDPOINTS GLOBALES ==========
     # Endpoints globales (no requieren tenant)
     path("api/", include(global_router.urls)),
+    path(
+        "api/pagos/webhooks/libelula/",
+        LibelulaWebhookGlobalView.as_view(),
+        name="pagos_webhook_libelula_global",
+    ),
+    path(
+        "api/pagos/simulador/<str:codigo_pago>/<str:token>/",
+        PagoQRSimuladorPublicView.as_view(),
+        name="pagos_qr_simulador_publico",
+    ),
     
     # ========== ENDPOINTS MODULARES POR TENANT ==========
     path(

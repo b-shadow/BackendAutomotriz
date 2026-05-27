@@ -50,18 +50,9 @@ class VannaAutomotrizService(VannaBase):
             'vehiculos_servicios_plan_citas.ServicioCatalogo',
             'atencion_tecnica_ejecucion.PresupuestoCita',
             'atencion_tecnica_ejecucion.PresupuestoDetalle',
-            'atencion_tecnica_ejecucion.OrdenTrabajoGlobal',
-            'atencion_tecnica_ejecucion.OrdenTrabajoGlobalMecanico',
-            'atencion_tecnica_ejecucion.OrdenTrabajoDetalle',
-            'inventario_proveedores_administracion.CategoriaInventario',
-            'inventario_proveedores_administracion.ItemInventario',
-            'inventario_proveedores_administracion.Compra',
-            'inventario_proveedores_administracion.CompraDetalle',
             'inventario_proveedores_administracion.PagoTaller',
             'inventario_proveedores_administracion.Factura',
-            'inventario_proveedores_administracion.VentaMostrador',
-            'inventario_proveedores_administracion.VentaMostradorDetalle',
-            'administracion_acceso_configuracion.Usuario'
+            'inventario_proveedores_administracion.VentaMostrador'
         ]
         
         for app_model in modelos_permitidos:
@@ -119,22 +110,6 @@ class VannaAutomotrizService(VannaBase):
             question="¿Cuáles son los servicios más rentables este mes?",
             sql=f"SELECT sc.nombre, SUM(cd.precio_referencial) as rentabilidad FROM citas_detalles cd JOIN servicios_catalogo sc ON cd.servicio_catalogo_id = sc.id WHERE cd.empresa_id = '{self.tenant_id}' AND cd.created_at >= date_trunc('month', CURRENT_DATE) GROUP BY sc.nombre ORDER BY rentabilidad DESC LIMIT 5"
         )
-        self.add_sql(
-            question="Lista los 5 clientes con más citas finalizadas en el sistema",
-            sql=f"SELECT u.nombres || ' ' || u.apellidos as cliente, COUNT(c.id) as total_citas FROM citas c JOIN usuarios u ON c.cliente_id = u.id WHERE c.empresa_id = '{self.tenant_id}' AND c.estado = 'FINALIZADA' GROUP BY u.nombres, u.apellidos ORDER BY total_citas DESC LIMIT 5"
-        )
-        self.add_sql(
-            question="¿Qué repuestos tienen stock bajo o están por agotarse?",
-            sql=f"SELECT i.nombre, i.stock_actual, i.stock_minimo FROM item_inventario i WHERE i.empresa_id = '{self.tenant_id}' AND i.stock_actual <= i.stock_minimo AND i.activo = true ORDER BY i.stock_actual ASC LIMIT 10"
-        )
-        self.add_sql(
-            question="¿Cuál es el ticket promedio?",
-            sql=f"SELECT COALESCE(SUM(monto_total), 0) / NULLIF(COUNT(DISTINCT cita_id), 0) AS ticket_promedio FROM pagos_taller WHERE empresa_id = '{self.tenant_id}' AND estado != 'ANULADO'"
-        )
-        self.add_sql(
-            question="¿Cuál es el mecánico más eficiente o que ha resuelto más detalles?",
-            sql=f"SELECT u.nombres || ' ' || u.apellidos as mecanico, COUNT(od.id) as detalles_resueltos FROM ordenes_trabajo_detalle od JOIN usuarios u ON od.mecanico_asignado_id = u.id WHERE od.empresa_id = '{self.tenant_id}' AND od.estado = 'FINALIZADO' GROUP BY u.nombres, u.apellidos ORDER BY detalles_resueltos DESC LIMIT 5"
-        )
 
     def system_message(self, message: str) -> any:
         return {"role": "system", "content": message}
@@ -156,13 +131,6 @@ class VannaAutomotrizService(VannaBase):
             f"\n1. SEGURIDAD: TODAS las consultas generadas DEBEN incluir la condición `empresa_id = '{self.tenant_id}'` en la cláusula WHERE. "
             f"\n2. JOINS: Si la consulta une varias tablas (JOIN), DEBES usar alias válidos para cada tabla y usar el alias correcto para la columna empresa_id (ej: `alias_tabla.empresa_id = '{self.tenant_id}'`) para evitar ambigüedad. NUNCA uses un alias que no hayas definido en el FROM."
             f"\n3. ESQUEMA ESTRICTO: NUNCA inventes columnas ni uses lógica de negocio alucinada. USA ÚNICAMENTE las columnas descritas en los esquemas DDL (ej. si una tabla tiene `monto_total`, NO uses `total` ni `subtotal` a menos que exista)."
-            f"\n4. NOMBRES LEGIBLES: NUNCA incluyas columnas de tipo UUID (como `id`, `vehiculo_id`, `cliente_id`) en tu SELECT final, ni siquiera junto con el nombre. SIEMPRE haz JOIN para traer SOLO el nombre legible (ej. `placa` del vehiculo, `nombres` del cliente). Las tablas finales NO deben tener UUIDs."
-            f"\n5. SINTAXIS SQL CORRECTA: Toda columna incluida en el SELECT que NO sea una función de agregación (como COUNT o SUM) DEBE estar incluida explícitamente en la cláusula GROUP BY. Si haces SELECT placa, nombres, COUNT(id), DEBES agrupar por placa, nombres."
-            f"\n6. CERO ALUCINACIONES DE COLUMNAS: Nunca asumas que una columna existe en una tabla solo porque suena lógico. Por ejemplo, `citas_detalles` tiene `precio_referencial`, pero `presupuestos_detalle` tiene `precio_unitario`. SIEMPRE revisa el DDL antes de escribir la columna."
-            f"\n7. CONTEXTO IMPLÍCITO DE EMPRESA: ASUME SIEMPRE que cualquier pregunta se refiere EXCLUSIVAMENTE a la empresa del usuario. Aunque el usuario no mencione explícitamente 'de mi empresa' o 'de este taller', tú DEBES aplicar el filtro `empresa_id = '{self.tenant_id}'`. NUNCA generes una consulta que busque datos globales de todas las empresas."
-            f"\n8. RELACIONES Y JOINS CORRECTOS: Nunca asumas relaciones directas que no existan en el DDL. Por ejemplo, `citas_detalles` NO se relaciona directamente con `vehiculos` ni con `usuarios`. Para obtener el vehículo de un detalle de cita, DEBES hacer JOIN a través de la tabla `citas` (`citas_detalles.cita_id = citas.id` y luego `citas.vehiculo_id = vehiculos.id`). Lo mismo aplica para llegar al cliente."
-            f"\n9. RESTRICCIÓN DE KPI ÚNICO (CRÍTICO): Tú generas UNA sola tabla SQL. NUNCA uses UNION ni intentes mezclar datos no relacionados (ej. 'vehículos' y 'finanzas' en la misma tabla). Si el usuario pide varias cosas a la vez en la misma pregunta, ELIGE SOLAMENTE LA PRIMERA y genera la consulta perfecta para esa. Ignora el resto. Es preferible responder 1 cosa bien, que generar un error de sintaxis."
-            f"\n10. CAMPOS DE TEXTO DIRECTOS: Los campos llamados `estado`, `tipo`, `origen`, etc., son de tipo VARCHAR y contienen el valor textual (ej. 'FINALIZADA'). NUNCA intentes hacer JOIN con tablas imaginarias llamadas `estados` o `tipos`."
         )
         
         # Si el prompt es una lista de diccionarios (formato Vanna)

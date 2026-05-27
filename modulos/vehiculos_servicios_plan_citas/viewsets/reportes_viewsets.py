@@ -9,12 +9,16 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 
 from modulos.atencion_tecnica_ejecucion.models import EstadoPresupuestoCita, PresupuestoCita
+from modulos.administracion_acceso_configuracion.models import Usuario
 from modulos.inventario_proveedores_administracion.models import (
     EstadoPagoTaller,
     EstadoSolicitudRepuesto,
     ItemInventario,
     PagoTaller,
     SolicitudRepuesto,
+    VentaMostrador,
+    Compra,
+    Proveedor
 )
 from modulos.vehiculos_servicios_plan_citas.models import (
     Cita,
@@ -508,3 +512,114 @@ class ReportesViewSet(viewsets.ViewSet):
             data["kpis"]["solicitudes_pendientes"] = solicitudes_pendientes
 
         return response.Response(data)
+
+    @action(detail=False, methods=["get"])
+    def usuarios(self, request, **kwargs):
+        empresa = request.user.empresa
+        rol = self._clean(request.query_params.get("rol"))
+        estado = request.query_params.get("estado")
+        
+        usuarios_qs = Usuario.objects.filter(empresa=empresa)
+        if rol:
+            usuarios_qs = usuarios_qs.filter(rol__nombre__iexact=rol)
+        if estado:
+            is_active = estado.lower() == 'activo'
+            usuarios_qs = usuarios_qs.filter(is_active=is_active)
+            
+        total_usuarios = usuarios_qs.count()
+        activos = usuarios_qs.filter(is_active=True).count()
+        inactivos = total_usuarios - activos
+        
+        top_clientes = Cita.objects.filter(empresa=empresa, cliente__isnull=False).values("cliente__nombres", "cliente__apellidos", "cliente__email").annotate(total_citas=Count('id')).order_by('-total_citas')[:10]
+        
+        top_clientes_fmt = [{"nombre": f"{c['cliente__nombres']} {c['cliente__apellidos']}", "email": c['cliente__email'], "citas": c['total_citas']} for c in top_clientes]
+        
+        return response.Response({
+            "kpis": {
+                "total_usuarios": total_usuarios,
+                "usuarios_activos": activos,
+                "usuarios_inactivos": inactivos
+            },
+            "top_clientes": top_clientes_fmt
+        })
+
+    @action(detail=False, methods=["get"])
+    def ventas_mostrador(self, request, **kwargs):
+        empresa = request.user.empresa
+        desde, hasta = self._get_fecha_range(request)
+        estado = self._clean(request.query_params.get("estado_venta"))
+        
+        ventas_qs = VentaMostrador.objects.filter(empresa=empresa, created_at__gte=desde, created_at__lte=hasta)
+        if estado:
+            ventas_qs = ventas_qs.filter(estado=estado)
+            
+        total_ventas = ventas_qs.count()
+        pagadas = ventas_qs.filter(estado='PAGADA').count()
+        pendientes = ventas_qs.filter(estado='PENDIENTE_PAGO').count()
+        ingresos_ventas = float(ventas_qs.filter(estado='PAGADA').aggregate(total=Sum("total")).get("total") or 0)
+        
+        return response.Response({
+            "kpis": {
+                "total_ventas": total_ventas,
+                "ventas_pagadas": pagadas,
+                "ventas_pendientes": pendientes,
+                "ingresos_ventas_mostrador": ingresos_ventas
+            },
+            "grafico_ventas": [] 
+        })
+
+    @action(detail=False, methods=["get"])
+    def compras(self, request, **kwargs):
+        empresa = request.user.empresa
+        desde, hasta = self._get_fecha_range(request)
+        estado = self._clean(request.query_params.get("estado_compra"))
+        
+        compras_qs = Compra.objects.filter(empresa=empresa, created_at__gte=desde, created_at__lte=hasta)
+        if estado:
+            compras_qs = compras_qs.filter(estado=estado)
+            
+        total_compras = compras_qs.count()
+        recibidas = compras_qs.filter(estado='RECIBIDA').count()
+        pendientes = compras_qs.filter(estado='EN_TRANSITO').count()
+        egresos_compras = float(compras_qs.aggregate(total=Sum("total_compra")).get("total") or 0)
+        
+        return response.Response({
+            "kpis": {
+                "total_compras": total_compras,
+                "compras_recibidas": recibidas,
+                "compras_pendientes": pendientes,
+                "gastos_compras": egresos_compras
+            }
+        })
+
+    @action(detail=False, methods=["get"])
+    def explorador_datos(self, request, **kwargs):
+        empresa = request.user.empresa
+        tabla = self._clean(request.query_params.get("tabla", ""))
+        columnas_str = self._clean(request.query_params.get("columnas", ""))
+        
+        if not tabla or not columnas_str:
+            return response.Response({"error": "Faltan parametros tabla o columnas"}, status=400)
+            
+        columnas = [c.strip() for c in columnas_str.split(",") if c.strip()]
+        
+        qs = None
+        if tabla == "vehiculos":
+            qs = Vehiculo.objects.filter(empresa=empresa)
+        elif tabla == "citas":
+            qs = Cita.objects.filter(empresa=empresa)
+        elif tabla == "usuarios":
+            qs = Usuario.objects.filter(empresa=empresa)
+        elif tabla == "ventas":
+            qs = VentaMostrador.objects.filter(empresa=empresa)
+        elif tabla == "compras":
+            qs = Compra.objects.filter(empresa=empresa)
+        else:
+            return response.Response({"error": "Tabla no soportada"}, status=400)
+            
+        # Ejecutar la consulta dinámica seleccionando solo las columnas pedidas
+        try:
+            resultados = list(qs.values(*columnas)[:500]) # Limit to 500 for safety
+            return response.Response({"resultados": resultados})
+        except Exception as e:
+            return response.Response({"error": str(e)}, status=400)

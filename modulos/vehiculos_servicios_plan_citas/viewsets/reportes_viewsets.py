@@ -594,32 +594,62 @@ class ReportesViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=["get"])
     def explorador_datos(self, request, **kwargs):
+        import json
         empresa = request.user.empresa
-        tabla = self._clean(request.query_params.get("tabla", ""))
+        vista = self._clean(request.query_params.get("vista", ""))
         columnas_str = self._clean(request.query_params.get("columnas", ""))
+        filtros_str = request.query_params.get("filtros", "{}")
         
-        if not tabla or not columnas_str:
-            return response.Response({"error": "Faltan parametros tabla o columnas"}, status=400)
+        if not vista or not columnas_str:
+            return response.Response({"error": "Faltan parametros vista o columnas"}, status=400)
             
         columnas = [c.strip() for c in columnas_str.split(",") if c.strip()]
         
-        qs = None
-        if tabla == "vehiculos":
-            qs = Vehiculo.objects.filter(empresa=empresa)
-        elif tabla == "citas":
-            qs = Cita.objects.filter(empresa=empresa)
-        elif tabla == "usuarios":
-            qs = Usuario.objects.filter(empresa=empresa)
-        elif tabla == "ventas":
-            qs = VentaMostrador.objects.filter(empresa=empresa)
-        elif tabla == "compras":
-            qs = Compra.objects.filter(empresa=empresa)
-        else:
-            return response.Response({"error": "Tabla no soportada"}, status=400)
-            
-        # Ejecutar la consulta dinámica seleccionando solo las columnas pedidas
         try:
-            resultados = list(qs.values(*columnas)[:500]) # Limit to 500 for safety
+            filtros_dict = json.loads(filtros_str)
+        except:
+            filtros_dict = {}
+            
+        # Limpiar filtros para asegurarse de que todo es string o lista de strings (seguridad básica)
+        safe_filters = {}
+        for k, v in filtros_dict.items():
+            if isinstance(v, list):
+                # Si es una lista, usar el operador __in
+                safe_filters[f"{k}__in"] = [str(item).strip() for item in v]
+            else:
+                safe_filters[k] = str(v).strip()
+        
+        qs = None
+        if vista == "vehiculos_citas":
+            qs = Cita.objects.filter(empresa=empresa).select_related('vehiculo', 'cliente')
+        elif vista == "citas_servicios":
+            # Nota: Necesitamos importar CitaDetalle si no está, asumiendo que podemos usar Cita.detalles
+            qs = Cita.objects.filter(empresa=empresa).prefetch_related('detalles__servicio_catalogo')
+        elif vista == "clientes_ventas":
+            qs = VentaMostrador.objects.filter(empresa=empresa).select_related('vendedor')
+            # Las ventas rapidas no tienen cliente asociado al usuario normalmente, pero es un ejemplo
+        else:
+            # Fallbacks a tablas simples
+            if vista == "vehiculos":
+                qs = Vehiculo.objects.filter(empresa=empresa)
+            elif vista == "citas":
+                qs = Cita.objects.filter(empresa=empresa)
+            elif vista == "usuarios":
+                qs = Usuario.objects.filter(empresa=empresa)
+            elif vista == "ventas":
+                qs = VentaMostrador.objects.filter(empresa=empresa)
+            elif vista == "compras":
+                qs = Compra.objects.filter(empresa=empresa)
+            else:
+                return response.Response({"error": "Vista no soportada"}, status=400)
+            
+        try:
+            # Aplicar filtros dinámicos
+            if safe_filters:
+                qs = qs.filter(**safe_filters)
+                
+            # Ejecutar la consulta dinámica
+            resultados = list(qs.values(*columnas)[:1000]) # Limit to 1000 for safety
             return response.Response({"resultados": resultados})
         except Exception as e:
             return response.Response({"error": str(e)}, status=400)

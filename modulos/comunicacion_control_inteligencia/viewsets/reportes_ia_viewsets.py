@@ -1,6 +1,7 @@
 from rest_framework import viewsets, status, response
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 import json
 
 from modulos.comunicacion_control_inteligencia.services.vanna_service import VannaAutomotrizService
@@ -58,6 +59,52 @@ class ReportesIAViewSet(viewsets.ViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         except Exception as e:
+            return response.Response(
+                {"error": f"Error al generar el reporte: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def transcribe_audio(self, request, *args, **kwargs):
+        """
+        Endpoint que recibe un archivo de audio y utiliza Groq Whisper
+        para transcribirlo a texto.
+        """
+        audio_file = request.FILES.get('audio')
+        if not audio_file:
+            return response.Response(
+                {"error": "No se proporcionó ningún archivo de audio."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        import os
+        from groq import Groq
+        
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            return response.Response(
+                {"error": "GROQ_API_KEY no está configurada."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
+        try:
+            client = Groq(api_key=api_key)
+            transcription = client.audio.transcriptions.create(
+              file=("audio.webm", audio_file.read()),
+              model="whisper-large-v3-turbo",
+              language="es",
+              response_format="json"
+            )
+            
+            return response.Response({
+                "text": transcription.text
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return response.Response(
+                {"error": f"Error en la transcripción: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
             import traceback
             traceback.print_exc()
             return response.Response(

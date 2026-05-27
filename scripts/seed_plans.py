@@ -1,8 +1,12 @@
 import os
+import sys
 import django
 
+# Add the backend directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Configurar Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.desarrollo')
 django.setup()
 
 from modulos.administracion_acceso_configuracion.models import Plan

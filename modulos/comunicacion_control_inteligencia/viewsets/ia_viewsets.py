@@ -177,8 +177,10 @@ class IAViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Guardar temporalmente para procesar
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
+        # Guardar temporalmente para procesar con la extensión correcta
+        import os
+        ext = os.path.splitext(audio_file.name)[1] or '.webm'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as temp_audio:
             for chunk in audio_file.chunks():
                 temp_audio.write(chunk)
             temp_path = temp_audio.name
@@ -186,6 +188,25 @@ class IAViewSet(viewsets.ModelViewSet):
         try:
             ai_service = AIService()
             texto = ai_service.transcribe_audio(temp_path)
+            print(f"DEBUG: Texto transcrito por Whisper: '{texto}'")
+            
+            # Limpiar alucinaciones típicas de Whisper en silencio/ruido
+            if texto:
+                texto_limpio = texto.strip().lower().replace(".", "").replace("!", "").replace("¿", "").replace("?", "").replace(",", "")
+                # Remover acentos/diacríticos para una comparación limpia
+                import unicodedata
+                texto_limpio = "".join(c for c in unicodedata.normalize('NFD', texto_limpio) if unicodedata.category(c) != 'Mn')
+                
+                print(f"DEBUG: Texto limpio para comparacion: '{texto_limpio}'")
+                hallucinaciones = [
+                    "gracias", "gracias por ver", "subtitulos por la comunidad de amaraorg", 
+                    "subtitulos por", "comunidad de amaraorg", "amaraorg", "descargado de", 
+                    "y ya", "uh", "eh", "oh", "subtitulos", "por ver"
+                ]
+                if texto_limpio in hallucinaciones or len(texto_limpio.strip()) <= 2:
+                    print("DEBUG: Detectada alucinacion, vaciando texto")
+                    texto = ""
+                    
             return response.Response({"texto": texto})
         finally:
             if os.path.exists(temp_path):

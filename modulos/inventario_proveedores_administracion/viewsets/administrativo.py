@@ -2,6 +2,7 @@ from decimal import Decimal
 import uuid
 from urllib.parse import quote
 
+import stripe
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -299,6 +300,56 @@ class VentaMostradorViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return VentaMostrador.objects.filter(empresa=self.request.tenant).prefetch_related("detalles").order_by("-created_at")
 
+    def _registrar_movimiento_caja_si_aplica(self, request, pago):
+        caja = CajaUsuario.objects.filter(
+            empresa=request.tenant,
+            administrativo=request.user,
+            activa=True,
+        ).first()
+        if not caja:
+            return
+        MovimientoCaja.objects.create(
+            empresa=request.tenant,
+            caja=caja,
+            tipo=TipoMovimientoCaja.INGRESO,
+            concepto=f"Pago venta mostrador {pago.id}",
+            monto=pago.monto_total,
+            pago_taller=pago,
+            venta=pago.venta,
+            registrado_por=request.user,
+        )
+
+    def _confirmar_venta_stock(self, request, venta):
+        if venta.estado == EstadoVentaMostrador.CONFIRMADA:
+            return
+        if venta.estado == EstadoVentaMostrador.ANULADA:
+            raise ValueError("La venta esta anulada.")
+
+        for det in venta.detalles.select_related("item_inventario"):
+            item = det.item_inventario
+            if not item:
+                continue
+            if item.stock_actual < det.cantidad:
+                raise ValueError(f"Stock insuficiente para {item.nombre}.")
+            stock_anterior = item.stock_actual
+            item.stock_actual = stock_anterior - det.cantidad
+            item.save(update_fields=["stock_actual", "updated_at"])
+            MovimientoInventario.objects.create(
+                empresa=request.tenant,
+                item_inventario=item,
+                tipo_movimiento=TipoMovimientoInventario.SALIDA_VENTA,
+                cantidad=-det.cantidad,
+                stock_anterior=stock_anterior,
+                stock_posterior=item.stock_actual,
+                referencia_tipo="VentaMostrador",
+                referencia_id=venta.id,
+                registrado_por=request.user,
+                observacion=f"Confirmacion venta {venta.id}",
+            )
+
+        venta.estado = EstadoVentaMostrador.CONFIRMADA
+        venta.save(update_fields=["estado", "updated_at"])
+
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         payload = request.data
@@ -352,34 +403,207 @@ class VentaMostradorViewSet(viewsets.ModelViewSet):
         venta = self.get_object()
         if venta.estado == EstadoVentaMostrador.CONFIRMADA:
             return Response({"error": "La venta ya esta confirmada."}, status=status.HTTP_400_BAD_REQUEST)
-        if venta.estado == EstadoVentaMostrador.ANULADA:
-            return Response({"error": "La venta esta anulada."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            self._confirmar_venta_stock(request, venta)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(VentaMostradorSerializer(venta).data)
 
-        for det in venta.detalles.select_related("item_inventario"):
-            item = det.item_inventario
-            if not item:
-                continue
-            if item.stock_actual < det.cantidad:
+    @action(detail=False, methods=["post"], url_path="iniciar-pago-tarjeta")
+    @transaction.atomic
+    def iniciar_pago_tarjeta(self, request, **kwargs):
+        payload = request.data
+        detalles = payload.get("detalles", [])
+        if not detalles:
+            return Response({"error": "Debe enviar detalles de venta."}, status=status.HTTP_400_BAD_REQUEST)
+
+        venta = VentaMostrador.objects.create(
+            empresa=request.tenant,
+            cliente_usuario_id=payload.get("cliente_usuario_id"),
+            cliente_nombre_libre=payload.get("cliente_nombre_libre"),
+            cliente_documento=payload.get("cliente_documento"),
+            vendido_por=request.user,
+            estado=EstadoVentaMostrador.BORRADOR,
+            subtotal=Decimal("0.00"),
+            total=Decimal("0.00"),
+        )
+
+        subtotal = Decimal("0.00")
+        for d in detalles:
+            item_id = d.get("item_inventario_id")
+            cantidad = int(d.get("cantidad") or 0)
+            precio = Decimal(str(d.get("precio_unitario") or 0))
+            if cantidad <= 0 or precio < 0:
+                return Response({"error": "Cantidad/precio invalido."}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                item = ItemInventario.objects.get(id=item_id, empresa=request.tenant, activo=True)
+            except ItemInventario.DoesNotExist:
+                return Response({"error": "Item no valido para venta."}, status=status.HTTP_400_BAD_REQUEST)
+            if item.stock_actual < cantidad:
                 return Response({"error": f"Stock insuficiente para {item.nombre}."}, status=status.HTTP_400_BAD_REQUEST)
-            stock_anterior = item.stock_actual
-            item.stock_actual = stock_anterior - det.cantidad
-            item.save(update_fields=["stock_actual", "updated_at"])
-            MovimientoInventario.objects.create(
+            sub = (Decimal(cantidad) * precio).quantize(Decimal("0.01"))
+            subtotal += sub
+            VentaMostradorDetalle.objects.create(
                 empresa=request.tenant,
+                venta=venta,
                 item_inventario=item,
-                tipo_movimiento=TipoMovimientoInventario.SALIDA_VENTA,
-                cantidad=-det.cantidad,
-                stock_anterior=stock_anterior,
-                stock_posterior=item.stock_actual,
-                referencia_tipo="VentaMostrador",
-                referencia_id=venta.id,
-                registrado_por=request.user,
-                observacion=f"Confirmacion venta {venta.id}",
+                cantidad=cantidad,
+                precio_unitario=precio,
+                subtotal=sub,
             )
 
-        venta.estado = EstadoVentaMostrador.CONFIRMADA
-        venta.save(update_fields=["estado", "updated_at"])
-        return Response(VentaMostradorSerializer(venta).data)
+        venta.subtotal = subtotal
+        venta.total = subtotal
+        venta.save(update_fields=["subtotal", "total", "updated_at"])
+
+        codigo_pago = f"STR-{timezone.now().strftime('%Y%m%d%H%M%S')}-{str(venta.id)[:6].upper()}"
+        pago = PagoTaller.objects.create(
+            empresa=request.tenant,
+            tipo_origen=TipoOrigenPagoTaller.VENTA,
+            venta=venta,
+            tipo_destino="VENTA",
+            id_destino=str(venta.id),
+            estado=EstadoPagoTaller.PENDIENTE,
+            proveedor="STRIPE",
+            ambiente="TEST" if settings.STRIPE_MODE == "test" else "LIVE",
+            codigo_pago=codigo_pago,
+            monto_total=venta.total,
+            monto_real=venta.total,
+            monto_cobrado=venta.total,
+            metodo_pago="TARJETA",
+            moneda="BOB",
+            referencia=f"STRIPE-{codigo_pago}",
+            referencia_externa=f"STRIPE-{codigo_pago}",
+            descripcion=payload.get("descripcion") or f"Pago tarjeta venta mostrador {venta.id}",
+            registrado_por=request.user,
+        )
+
+        frontend_base = (request.headers.get("Origin") or getattr(settings, "PAGOS_RETURN_URL", "") or "http://localhost:5173").rstrip("/")
+        success_url = (
+            f"{frontend_base}/{request.tenant.slug}/app"
+            f"?stripe_sale_result=success&venta_id={venta.id}&pago_taller_id={pago.id}&session_id={{CHECKOUT_SESSION_ID}}"
+        )
+        cancel_url = (
+            f"{frontend_base}/{request.tenant.slug}/app"
+            f"?stripe_sale_result=cancel&venta_id={venta.id}&pago_taller_id={pago.id}"
+        )
+
+        try:
+            currency = (getattr(settings, "STRIPE_CURRENCY", "usd") or "usd").lower()
+            session = stripe.checkout.Session.create(
+                mode="payment",
+                payment_method_types=["card"],
+                line_items=[
+                    {
+                        "price_data": {
+                            "currency": currency,
+                            "product_data": {"name": pago.descripcion},
+                            "unit_amount": int((venta.total * Decimal("100")).quantize(Decimal("1"))),
+                        },
+                        "quantity": 1,
+                    }
+                ],
+                metadata={
+                    "pago_taller_id": str(pago.id),
+                    "venta_id": str(venta.id),
+                    "tenant_slug": request.tenant.slug,
+                },
+                success_url=success_url,
+                cancel_url=cancel_url,
+            )
+        except Exception as exc:
+            pago.estado = EstadoPagoTaller.ERROR
+            pago.metadata = {"stripe_error": str(exc)}
+            pago.save(update_fields=["estado", "metadata", "updated_at"])
+            return Response({"error": f"No se pudo iniciar pago con Stripe: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        pago.id_pago_proveedor = session.id
+        pago.url_pago = session.url
+        pago.respuesta_proveedor_raw = {"checkout_session_id": session.id}
+        pago.save(update_fields=["id_pago_proveedor", "url_pago", "respuesta_proveedor_raw", "updated_at"])
+
+        return Response(
+            {
+                "pagoId": str(pago.id),
+                "ventaId": str(venta.id),
+                "checkoutUrl": session.url,
+                "sessionId": session.id,
+                "estado": pago.estado,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=["post"], url_path="confirmar-pago-tarjeta")
+    @transaction.atomic
+    def confirmar_pago_tarjeta(self, request, **kwargs):
+        venta_id = request.data.get("venta_id")
+        pago_taller_id = request.data.get("pago_taller_id")
+        session_id = request.data.get("session_id")
+        if not venta_id or not pago_taller_id or not session_id:
+            return Response({"error": "venta_id, pago_taller_id y session_id son requeridos."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            venta = VentaMostrador.objects.get(id=venta_id, empresa=request.tenant)
+            pago = PagoTaller.objects.get(
+                id=pago_taller_id,
+                empresa=request.tenant,
+                venta=venta,
+                tipo_destino="VENTA",
+                id_destino=str(venta.id),
+                metodo_pago="TARJETA",
+            )
+        except (VentaMostrador.DoesNotExist, PagoTaller.DoesNotExist):
+            return Response({"error": "Pago de tarjeta no encontrado para la venta."}, status=status.HTTP_404_NOT_FOUND)
+
+        if pago.estado == EstadoPagoTaller.FACTURADO and venta.estado == EstadoVentaMostrador.CONFIRMADA:
+            return Response({"ok": True, "estado": pago.estado}, status=status.HTTP_200_OK)
+        if pago.estado in [EstadoPagoTaller.CANCELADO, EstadoPagoTaller.VENCIDO, EstadoPagoTaller.ANULADO]:
+            return Response({"error": f"El pago no puede confirmarse en estado {pago.estado}."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+        except Exception as exc:
+            return Response({"error": f"No se pudo consultar Stripe: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if session.id != pago.id_pago_proveedor:
+            return Response({"error": "La sesion de Stripe no coincide con el pago."}, status=status.HTTP_400_BAD_REQUEST)
+        if session.payment_status != "paid":
+            return Response({"error": f"El pago no esta confirmado en Stripe. Estado: {session.payment_status}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if pago.estado != EstadoPagoTaller.FACTURADO:
+            pago.estado = EstadoPagoTaller.CONFIRMADO
+            pago.monto_pagado = pago.monto_total
+            pago.fecha_pago = timezone.now()
+            pago.recibido_at = pago.fecha_pago
+            pago.save(update_fields=["estado", "monto_pagado", "fecha_pago", "recibido_at", "updated_at"])
+            self._registrar_movimiento_caja_si_aplica(request, pago)
+
+        try:
+            self._confirmar_venta_stock(request, venta)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not hasattr(pago, "factura"):
+            Factura.objects.create(
+                empresa=request.tenant,
+                pago_taller=pago,
+                numero=f"FAC-{timezone.now().strftime('%Y%m%d%H%M%S')}",
+                nit_razon_social=request.data.get("nit_razon_social", ""),
+                total=pago.monto_total,
+                archivo_pdf_url=request.data.get("archivo_pdf_url", ""),
+            )
+            pago.estado = EstadoPagoTaller.FACTURADO
+            pago.save(update_fields=["estado", "updated_at"])
+
+        return Response(
+            {
+                "ok": True,
+                "estado": pago.estado,
+                "venta_estado": venta.estado,
+                "venta_id": str(venta.id),
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class PagoTallerViewSet(viewsets.ModelViewSet):

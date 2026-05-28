@@ -31,15 +31,20 @@ class IAViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Solo conversaciones ACTIVAS del usuario, priorizando las que tienen mensajes
+        # Permite filtrar por estado (ej. ?estado=ARCHIVADA para historial). Por defecto devuelve ACTIVA.
+        estado = self.request.query_params.get('estado', 'ACTIVA')
         from django.db.models import Count
-        return self.queryset.filter(
+        
+        qs = self.queryset.filter(
             empresa=self.request.user.empresa,
-            usuario=self.request.user,
-            estado='ACTIVA'
-        ).annotate(
+            usuario=self.request.user
+        )
+        if estado != 'TODAS':
+            qs = qs.filter(estado=estado)
+            
+        return qs.annotate(
             num_mensajes=Count('mensajes')
-        ).order_by('-num_mensajes', '-updated_at')
+        ).order_by('-updated_at')
 
     def perform_create(self, serializer):
         serializer.save(
@@ -177,18 +182,27 @@ class IAViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Guardar temporalmente para procesar con la extensión correcta
+        # Procesar con la extensión correcta
         import os
+        import traceback
         ext = os.path.splitext(audio_file.name)[1] or '.webm'
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as temp_audio:
-            for chunk in audio_file.chunks():
-                temp_audio.write(chunk)
-            temp_path = temp_audio.name
+        
+        # Guardar logs en un archivo de debug
+        debug_log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), 'transcribe_debug.log')
+        
+        with open(debug_log_path, 'a', encoding='utf-8') as log_f:
+            log_f.write(f"\n--- Nueva Transcripción ---\n")
+            log_f.write(f"Nombre de archivo: {audio_file.name}\n")
+            log_f.write(f"Tamaño: {audio_file.size} bytes\n")
+            log_f.write(f"Content Type: {audio_file.content_type}\n")
+            log_f.write(f"Extensión detectada: {ext}\n")
 
         try:
             ai_service = AIService()
-            texto = ai_service.transcribe_audio(temp_path)
-            print(f"DEBUG: Texto transcrito por Whisper: '{texto}'")
+            texto = ai_service.transcribe_audio(audio_file)
+            
+            with open(debug_log_path, 'a', encoding='utf-8') as log_f:
+                log_f.write(f"Resultado de Whisper: '{texto}'\n")
             
             # Limpiar alucinaciones típicas de Whisper en silencio/ruido
             if texto:
@@ -197,20 +211,22 @@ class IAViewSet(viewsets.ModelViewSet):
                 import unicodedata
                 texto_limpio = "".join(c for c in unicodedata.normalize('NFD', texto_limpio) if unicodedata.category(c) != 'Mn')
                 
-                print(f"DEBUG: Texto limpio para comparacion: '{texto_limpio}'")
                 hallucinaciones = [
                     "gracias", "gracias por ver", "subtitulos por la comunidad de amaraorg", 
                     "subtitulos por", "comunidad de amaraorg", "amaraorg", "descargado de", 
                     "y ya", "uh", "eh", "oh", "subtitulos", "por ver"
                 ]
                 if texto_limpio in hallucinaciones or len(texto_limpio.strip()) <= 2:
-                    print("DEBUG: Detectada alucinacion, vaciando texto")
+                    with open(debug_log_path, 'a', encoding='utf-8') as log_f:
+                        log_f.write(f"Texto clasificado como alucinación ('{texto_limpio}'), vaciando\n")
                     texto = ""
                     
             return response.Response({"texto": texto})
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        except Exception as e:
+            tb = traceback.format_exc()
+            with open(debug_log_path, 'a', encoding='utf-8') as log_f:
+                log_f.write(f"ERROR: {str(e)}\nTraceback:\n{tb}\n")
+            return response.Response({"texto": "", "error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def _ejecutar_logica_accion(self, accion, user):
         """
@@ -347,9 +363,17 @@ class IAViewSet(viewsets.ModelViewSet):
             accion.estado = "EJECUTADA"
             accion.resultado = {"status": "success", "message": "Cita agendada correctamente (Simulado)."}
 
-        elif accion.accion in ["BUSCAR_PLAN", "VER_PLAN", "EDITAR_PLAN", "CAMBIAR_ESTADO_PLAN", "AGREGAR_DETALLE_PLAN"]:
+        elif accion.accion == "BUSCAR_VEHICULO":
             accion.estado = "EJECUTADA"
-            accion.resultado = {"status": "success", "message": f"Acción de plan {accion.accion} delegada al frontend."}
+            accion.resultado = {"status": "success", "message": "Búsqueda de vehículo delegada al frontend."}
+
+        elif accion.accion == "FILTRAR_CITAS":
+            accion.estado = "EJECUTADA"
+            accion.resultado = {"status": "success", "message": "Filtrado de citas delegado al frontend."}
+
+        elif accion.accion in ["BUSCAR_PLAN_VEHICULO", "VER_PLAN_VEHICULO", "EDITAR_PLAN_VEHICULO", "CAMBIAR_ESTADO_PLAN_VEHICULO", "AGREGAR_DETALLE_PLAN_VEHICULO"]:
+            accion.estado = "EJECUTADA"
+            accion.resultado = {"status": "success", "message": f"Acción de plan de vehículo {accion.accion} delegada al frontend."}
             
         elif accion.accion in ["FILTRAR_BITACORA", "EXPORTAR_BITACORA"]:
             accion.estado = "EJECUTADA"

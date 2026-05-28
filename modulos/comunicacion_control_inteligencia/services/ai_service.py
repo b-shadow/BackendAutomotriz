@@ -11,7 +11,7 @@ class AIService:
 
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
-        self.model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        self.model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
         self.transcription_model = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3")
         
         if not self.api_key:
@@ -23,7 +23,10 @@ class AIService:
         """
         Obtiene una respuesta de chat de Groq.
         """
-        system_prompt = self._build_system_prompt(user_context)
+        # Extraer texto de la ÚLTIMA consulta del usuario para inyectar selectivamente reglas
+        # En lugar de usar todo el historial, usamos solo el último mensaje para no acumular reglas
+        last_user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+        system_prompt = self._build_system_prompt(user_context, last_user_msg)
         
         full_messages = [
             {"role": "system", "content": system_prompt}
@@ -56,24 +59,40 @@ class AIService:
                 "content": "Lo siento, he tenido un problema técnico al procesar tu solicitud. Por favor, inténtalo de nuevo en un momento."
             }
 
-    def transcribe_audio(self, audio_file_path: str) -> str:
+    def transcribe_audio(self, audio_file) -> str:
         """
-        Transcribe un archivo de audio a texto usando Whisper en Groq.
+        Transcribe un archivo de audio (puede ser un path o un objeto de archivo) a texto usando Whisper en Groq.
         """
+        debug_log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), 'transcribe_debug.log')
         try:
-            with open(audio_file_path, "rb") as file:
-                transcription = self.client.audio.transcriptions.create(
-                    file=(os.path.basename(audio_file_path), file.read()),
-                    model=self.transcription_model,
-                    language="es",
-                    response_format="text"
-                )
-            return transcription
+            if isinstance(audio_file, str):
+                with open(audio_file, "rb") as file:
+                    file_data = file.read()
+                    filename = os.path.basename(audio_file)
+            else:
+                file_data = audio_file.read()
+                filename = getattr(audio_file, 'name', 'audio.webm') or 'audio.webm'
+
+            transcription = self.client.audio.transcriptions.create(
+                file=(filename, file_data),
+                model="whisper-large-v3-turbo",
+                language="es",
+                prompt="Asistente de taller mecánico en español.",
+                response_format="json"
+            )
+            return transcription.text
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                with open(debug_log_path, 'a', encoding='utf-8') as log_f:
+                    log_f.write(f"Exception inside AIService.transcribe_audio: {str(e)}\nTraceback:\n{tb}\n")
+            except:
+                pass
             print(f"Error en AIService.transcribe_audio: {str(e)}")
             return ""
 
-    def _build_system_prompt(self, context: Optional[Dict[str, Any]] = None) -> str:
+    def _build_system_prompt(self, context: Optional[Dict[str, Any]] = None, query_text: str = "") -> str:
         """
         Construye el prompt de sistema para dar contexto a la IA.
         """
@@ -84,5 +103,5 @@ class AIService:
                 context_str += f"- Propietarios disponibles: {', '.join(context.get('owners_list'))}\n"
 
         from .prompts import get_full_prompt
-        prompt = get_full_prompt(context_str)
+        prompt = get_full_prompt(context_str, query_text)
         return prompt

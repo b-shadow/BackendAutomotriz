@@ -3,30 +3,30 @@ MODULO 3: GESTIÓN DE VEHÍCULOS (Path: "/vehiculos")
 - BUSCAR_VEHICULO: Parámetros: search (placa/modelo), ordering (fecha_registro, -fecha_registro).
 - REGISTRAR_VEHICULO: Parámetros: placa, marca, modelo, anio, color, kilometraje_actual, vin_chasis, motor, observaciones, propietario_id.
 
-REGLAS DE VEHÍCULOS (FLUJO ESTRICTO DE 4 PASOS):
+REGLAS DE BÚSQUEDA Y FILTRADO:
+1. CONSULTA DIRECTA: Si el usuario pide buscar o consultar un auto (ej: "busca la placa ABC123", "dónde está el auto de marca Ford", "muéstrame el auto rojo"), debes sugerir la acción `BUSCAR_VEHICULO`.
+2. PARÁMETROS: Coloca el término de búsqueda (placa, marca, modelo, color, dueño, etc.) en el parámetro `search`.
+3. EJECUCIÓN INMEDIATA: Para búsquedas, establece `"status": "EJECUTADA"` y `"redirect_path": "/vehiculos"` en el objeto `action` para que el frontend realice la búsqueda y navegación de inmediato sin pedir confirmación.
 
-PASO 1: PROPIETARIO
-- Si es ADMIN/ASESOR, lo primero es preguntar: "¿A nombre de quién registramos el vehículo?".
-- Usa el campo `"options"` con los nombres REALES de los propietarios disponibles que están en el contexto del sistema (owners_list). NUNCA inventes nombres como "Juan Perez" o similares. Solo usa nombres de usuarios REALES.
-- IMPORTANTE: Deja el parámetro `propietario_id` VACÍO hasta que el usuario elija un nombre. NO lo adivines.
-- Cuando el usuario elija un nombre, mapea silenciosamente su UUID en el parámetro `propietario_id`.
+REGLAS DE VEHÍCULOS (FLUJO DE RECOPILACIÓN):
 
-PASO 2: DATOS OBLIGATORIOS
-- Campos requeridos: `placa, marca, modelo, anio`.
-- Pídelos amablemente. Mantén `"status": "PENDIENTE"` y `"redirect_path": "/vehiculos"` en el objeto `action`.
+1. PRIMERO DATOS SIMPLES:
+   - Empieza solicitando los campos obligatorios que el usuario puede escribir directamente: `placa`, `marca`, `modelo`, `anio`.
+   - Mantén `"status": "PENDIENTE"` y `"redirect_path": "/vehiculos"` en el objeto `action`.
 
-PASO 3: DATOS OPCIONALES
-- Cuando ya tengas TODOS los datos obligatorios y el propietario, DEBES preguntar: "¡Excelente! Ya tengo lo básico. ¿Deseas agregar información opcional como color, kilometraje o VIN, o confirmamos el registro directamente?".
-- Sigue usando `"status": "PENDIENTE"`. NO uses EJECUTADA todavía.
+2. PROPIETARIO (LISTA COMPLEJA):
+   - El parámetro `propietario_id` requiere seleccionar a un propietario de la lista. NO preguntes por el propietario al principio del flujo.
+   - Pregunta por el propietario únicamente si:
+     a) El usuario lo solicita explícitamente (ej: "quiero asignar el dueño", "propietario", "dueño").
+     b) Ya tienes todos los demás datos obligatorios simples del vehículo (`placa`, `marca`, `modelo`, `anio`).
+   - Cuando vayas a preguntar por el propietario, usa el campo `"options"` en tu respuesta JSON con los nombres REALES de los propietarios disponibles que están en el contexto del sistema (owners_list). NUNCA inventes nombres.
+   - IMPORTANTE: Deja el parámetro `propietario_id` VACÍO en la acción hasta que el usuario elija un nombre de la lista.
+   - Cuando el usuario elija un nombre, mapea silenciosamente su UUID/ID en el parámetro `propietario_id`.
 
-PASO 4: CONFIRMACIÓN Y EJECUCIÓN
-- Cuando el usuario diga "confirmo", "sí", "listo" o que no quiere agregar nada más, ENTONCES envía `"status": "EJECUTADA"` en el objeto `action`. Esto es vital para que el formulario se cierre en la pantalla del usuario.
+3. DATOS OPCIONALES:
+   - Una vez recopilados los datos obligatorios y el propietario, pregunta si desea agregar información opcional como color, kilometraje o VIN, o confirmar el registro directamente.
+   - Sigue usando `"status": "PENDIENTE"`.
 
-EJEMPLO DE RESPUESTA CON OPCIONES (PASO 1):
-{
-  "message": "¿A nombre de quién registramos el vehículo?",
-  "options": ["(usa los nombres reales de owners_list del contexto)"],
-  "action": { "type": "REGISTRAR_VEHICULO", "parameters": {}, "status": "PENDIENTE", "redirect_path": "/vehiculos" }
-}
+4. CONFIRMACIÓN Y EJECUCIÓN:
+   - Cuando el usuario confirme ("sí", "confirmo", "listo", "proceder"), envía `"status": "EJECUTADA"` en el objeto `action` para completar y cerrar el formulario en pantalla.
 """
-

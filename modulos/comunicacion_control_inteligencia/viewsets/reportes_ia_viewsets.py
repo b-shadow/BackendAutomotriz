@@ -2,6 +2,7 @@ from rest_framework import viewsets, status, response
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 import json
+import traceback
 
 from modulos.comunicacion_control_inteligencia.services.vanna_service import VannaAutomotrizService
 
@@ -30,9 +31,31 @@ class ReportesIAViewSet(viewsets.ViewSet):
             
             # Generar SQL (Vanna se encarga del RAG interno)
             sql = vanna_service.generate_sql(question=prompt)
-            
-            # Ejecutar SQL y obtener DataFrame
-            df = vanna_service.run_sql(sql)
+            df = None
+            last_error = None
+
+            # Ejecutar SQL con autocorrección progresiva.
+            # Intento 1: SQL original
+            # Intento 2: SQL reparado con mensaje de error
+            # Intento 3: SQL forzado por intención del prompt
+            for attempt in range(3):
+                try:
+                    df = vanna_service.run_sql(sql)
+                    last_error = None
+                    break
+                except Exception as exec_error:
+                    last_error = exec_error
+                    if attempt == 0:
+                        sql = vanna_service.repair_sql_with_error(sql, str(exec_error))
+                    elif attempt == 1:
+                        forced_sql = vanna_service._build_forced_sql_from_prompt(prompt)
+                        if forced_sql:
+                            sql = vanna_service._sanitize_sql(forced_sql)
+                    else:
+                        break
+
+            if last_error is not None:
+                raise last_error
             
             # Generar gráfico Plotly (Devuelve objeto Figure)
             fig = vanna_service.generate_plotly(df)
@@ -58,7 +81,6 @@ class ReportesIAViewSet(viewsets.ViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         except Exception as e:
-            import traceback
             traceback.print_exc()
             return response.Response(
                 {"error": f"Error al generar el reporte: {str(e)}"},

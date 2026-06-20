@@ -54,6 +54,7 @@ from modulos.inventario_proveedores_administracion.services.pagos_qr import (
     monto_esperado_para_validacion,
     validar_monto_real,
 )
+from modulos.comunicacion_control_inteligencia.services import notificar_usuarios_on_commit
 
 
 class IsAuthenticatedTenant(permissions.BasePermission):
@@ -76,6 +77,50 @@ class PuedeGestionarCajaPagos(permissions.BasePermission):
     def has_permission(self, request, view):
         rol = request.user.rol.nombre if request.user and request.user.rol else None
         return rol in ["ADMIN", "ADMINISTRATIVO"]
+
+
+def destinatarios_pago_o_venta(obj):
+    if isinstance(obj, PagoTaller):
+        if obj.cita:
+            return [obj.cita.cliente, obj.cita.asesor_responsable]
+        if obj.venta:
+            return [obj.venta.cliente_usuario, obj.venta.vendido_por]
+        return [obj.registrado_por]
+    if isinstance(obj, VentaMostrador):
+        return [obj.cliente_usuario, obj.vendido_por]
+    if isinstance(obj, Compra):
+        return [obj.registrado_por]
+    if isinstance(obj, Factura):
+        return destinatarios_pago_o_venta(obj.pago_taller)
+    return []
+
+
+def notificar_estado_pago(obj, titulo, mensaje, tipo, *, estado=None, excluir_usuario_ids=None):
+    if not getattr(obj, "empresa", None):
+        return
+    entidad_tipo = obj.__class__.__name__
+    data = {}
+    if estado:
+        data["estado"] = str(estado)
+    if isinstance(obj, PagoTaller):
+        data["pago_id"] = str(obj.id)
+    if isinstance(obj, VentaMostrador):
+        data["venta_id"] = str(obj.id)
+    if isinstance(obj, Compra):
+        data["compra_id"] = str(obj.id)
+    if isinstance(obj, Factura):
+        data["factura_id"] = str(obj.id)
+    notificar_usuarios_on_commit(
+        empresa=obj.empresa,
+        usuarios=destinatarios_pago_o_venta(obj),
+        titulo=titulo,
+        mensaje=mensaje,
+        tipo=tipo,
+        entidad_tipo=entidad_tipo,
+        entidad_id=obj.id,
+        data=data,
+        excluir_usuario_ids=excluir_usuario_ids or [],
+    )
 
 
 def procesar_callback_libelula(payload: dict, headers, tenant=None):
@@ -137,11 +182,25 @@ def procesar_callback_libelula(payload: dict, headers, tenant=None):
         pago.fecha_pago = ahora
         pago.recibido_at = ahora
         pago.save(update_fields=["estado", "monto_pagado", "fecha_pago", "recibido_at", "updated_at"])
+        notificar_estado_pago(
+            pago,
+            "Pago QR confirmado",
+            f"Se confirmó el pago {pago.codigo_pago or pago.id} por Bs {pago.monto_total}.",
+            "pago_qr_confirmado_callback",
+            estado=pago.estado,
+        )
         return {"ok": True, "status": status.HTTP_200_OK, "body": {"ok": True, "estado": pago.estado}}
 
     if estado_norm in [EstadoPagoTaller.FALLIDO, EstadoPagoTaller.CANCELADO, EstadoPagoTaller.VENCIDO, EstadoPagoTaller.PROCESANDO]:
         pago.estado = estado_norm
         pago.save(update_fields=["estado", "updated_at"])
+        notificar_estado_pago(
+            pago,
+            "Pago QR actualizado",
+            f"El pago {pago.codigo_pago or pago.id} cambió a estado {pago.estado}.",
+            "pago_qr_estado_actualizado_callback",
+            estado=pago.estado,
+        )
     return {"ok": True, "status": status.HTTP_200_OK, "body": {"ok": True, "estado": pago.estado}}
 
 
@@ -276,6 +335,17 @@ class CompraViewSet(viewsets.ViewSet):
         compra.subtotal = subtotal
         compra.total = subtotal
         compra.save(update_fields=["subtotal", "total", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=destinatarios_pago_o_venta(compra),
+            titulo="Compra registrada",
+            mensaje=f"Se registró la compra {compra.numero_documento} por Bs {compra.total}.",
+            tipo="compra_registrada",
+            entidad_tipo="Compra",
+            entidad_id=compra.id,
+            data={"compra_id": str(compra.id), "estado": compra.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(self._serialize(compra), status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="marcar-recibida")
@@ -323,6 +393,17 @@ class CompraViewSet(viewsets.ViewSet):
             concepto=concepto_compra,
             monto=compra.total,
             registrado_por=request.user,
+        )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=destinatarios_pago_o_venta(compra),
+            titulo="Compra recibida",
+            mensaje=f"La compra {compra.numero_documento} fue recibida e ingresó a inventario.",
+            tipo="compra_recibida",
+            entidad_tipo="Compra",
+            entidad_id=compra.id,
+            data={"compra_id": str(compra.id), "estado": compra.estado},
+            excluir_usuario_ids=[request.user.id],
         )
         return Response(self._serialize(compra))
 
@@ -444,6 +525,17 @@ class VentaMostradorViewSet(viewsets.ModelViewSet):
         venta.subtotal = subtotal
         venta.total = subtotal
         venta.save(update_fields=["subtotal", "total", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=destinatarios_pago_o_venta(venta),
+            titulo="Venta de mostrador creada",
+            mensaje=f"Se registró una venta de mostrador por Bs {venta.total}.",
+            tipo="venta_mostrador_creada",
+            entidad_tipo="VentaMostrador",
+            entidad_id=venta.id,
+            data={"venta_id": str(venta.id), "estado": venta.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(VentaMostradorSerializer(venta).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="confirmar")
@@ -456,6 +548,17 @@ class VentaMostradorViewSet(viewsets.ModelViewSet):
             self._confirmar_venta_stock(request, venta)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=destinatarios_pago_o_venta(venta),
+            titulo="Venta confirmada",
+            mensaje=f"La venta de mostrador por Bs {venta.total} fue confirmada.",
+            tipo="venta_mostrador_confirmada",
+            entidad_tipo="VentaMostrador",
+            entidad_id=venta.id,
+            data={"venta_id": str(venta.id), "estado": venta.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(VentaMostradorSerializer(venta).data)
 
     @action(detail=False, methods=["post"], url_path="iniciar-pago-tarjeta")
@@ -570,6 +673,14 @@ class VentaMostradorViewSet(viewsets.ModelViewSet):
         pago.url_pago = session.url
         pago.respuesta_proveedor_raw = {"checkout_session_id": session.id}
         pago.save(update_fields=["id_pago_proveedor", "url_pago", "respuesta_proveedor_raw", "updated_at"])
+        notificar_estado_pago(
+            pago,
+            "Pago con tarjeta iniciado",
+            f"Se inició un pago con tarjeta por Bs {venta.total}.",
+            "venta_pago_tarjeta_iniciado",
+            estado=pago.estado,
+            excluir_usuario_ids=[request.user.id],
+        )
 
         return Response(
             {
@@ -643,6 +754,23 @@ class VentaMostradorViewSet(viewsets.ModelViewSet):
             )
             pago.estado = EstadoPagoTaller.FACTURADO
             pago.save(update_fields=["estado", "updated_at"])
+
+        notificar_estado_pago(
+            pago,
+            "Pago con tarjeta confirmado",
+            f"Se confirmó el pago con tarjeta de la venta por Bs {pago.monto_total}.",
+            "venta_pago_tarjeta_confirmado",
+            estado=pago.estado,
+            excluir_usuario_ids=[request.user.id],
+        )
+        notificar_estado_pago(
+            venta,
+            "Venta cobrada y confirmada",
+            f"La venta {venta.id} quedó confirmada y cobrada por tarjeta.",
+            "venta_confirmada_tarjeta",
+            estado=venta.estado,
+            excluir_usuario_ids=[request.user.id],
+        )
 
         return Response(
             {
@@ -822,6 +950,14 @@ class PagoTallerViewSet(viewsets.ModelViewSet):
                     "id_pago_proveedor", "id_transaccion_proveedor", "qr_imagen_url", "qr_imagen_base64",
                     "url_pago", "qr_payload", "respuesta_proveedor_raw", "updated_at"
                 ])
+            notificar_estado_pago(
+                pago,
+                "Pago QR generado",
+                f"Se generó un pago QR por Bs {pago.monto_total}.",
+                "pago_qr_generado",
+                estado=pago.estado,
+                excluir_usuario_ids=[request.user.id],
+            )
             return Response(PagoTallerSerializer(pago).data, status=status.HTTP_201_CREATED)
         except PagoQRError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -835,6 +971,13 @@ class PagoTallerViewSet(viewsets.ModelViewSet):
         if pago.estado == EstadoPagoTaller.PENDIENTE and pago.fecha_expiracion and timezone.now() > pago.fecha_expiracion:
             pago.estado = EstadoPagoTaller.VENCIDO
             pago.save(update_fields=["estado", "updated_at"])
+            notificar_estado_pago(
+                pago,
+                "Pago QR vencido",
+                f"El pago {pago.codigo_pago or pago.id} venció sin confirmación.",
+                "pago_qr_vencido",
+                estado=pago.estado,
+            )
         if (
             pago.estado == EstadoPagoTaller.PENDIENTE
             and pago.id_pago_proveedor
@@ -850,10 +993,25 @@ class PagoTallerViewSet(viewsets.ModelViewSet):
                         Decimal(str(estado_proveedor.get("monto_pagado") or "0")),
                         estado_proveedor.get("moneda") or pago.moneda,
                     )
+                    if pago.estado == EstadoPagoTaller.CONFIRMADO:
+                        notificar_estado_pago(
+                            pago,
+                            "Pago QR confirmado",
+                            f"Se confirmó el pago {pago.codigo_pago or pago.id} por Bs {pago.monto_total}.",
+                            "pago_qr_confirmado_consulta",
+                            estado=pago.estado,
+                        )
                 elif estado_norm in [EstadoPagoTaller.FALLIDO, EstadoPagoTaller.CANCELADO, EstadoPagoTaller.VENCIDO]:
                     pago.estado = estado_norm
                     pago.respuesta_proveedor_raw = estado_proveedor.get("raw")
                     pago.save(update_fields=["estado", "respuesta_proveedor_raw", "updated_at"])
+                    notificar_estado_pago(
+                        pago,
+                        "Pago QR actualizado",
+                        f"El pago {pago.codigo_pago or pago.id} cambió a estado {pago.estado}.",
+                        "pago_qr_estado_consulta",
+                        estado=pago.estado,
+                    )
             except Exception:
                 pass
         return Response(PagoTallerSerializer(pago).data, status=status.HTTP_200_OK)
@@ -867,8 +1025,23 @@ class PagoTallerViewSet(viewsets.ModelViewSet):
             if pago.estado == EstadoPagoTaller.PENDIENTE:
                 pago.estado = EstadoPagoTaller.FALLIDO
                 pago.save(update_fields=["estado", "updated_at"])
+                notificar_estado_pago(
+                    pago,
+                    "Pago QR rechazado",
+                    f"El pago {pago.codigo_pago or pago.id} fue rechazado.",
+                    "pago_qr_rechazado_simulado",
+                    estado=pago.estado,
+                )
             return Response({"ok": True, "estado": pago.estado}, status=status.HTTP_200_OK)
         resultado = self._aplicar_confirmacion_simulada(pago)
+        if pago.estado == EstadoPagoTaller.CONFIRMADO:
+            notificar_estado_pago(
+                pago,
+                "Pago QR confirmado",
+                f"Se confirmó el pago {pago.codigo_pago or pago.id} por Bs {pago.monto_total}.",
+                "pago_qr_confirmado_simulado",
+                estado=pago.estado,
+            )
         return Response({"ok": True, "estado": pago.estado, "resultado": resultado}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], url_path="estado")
@@ -923,6 +1096,17 @@ class PagoTallerViewSet(viewsets.ModelViewSet):
             monto=pago.monto_total,
             pago_taller=pago,
             registrado_por=request.user,
+        )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=destinatarios_pago_o_venta(pago),
+            titulo="Pago recibido",
+            mensaje=f"Se confirmó un pago por Bs {pago.monto_total}.",
+            tipo="pago_taller_recibido",
+            entidad_tipo="PagoTaller",
+            entidad_id=pago.id,
+            data={"pago_id": str(pago.id), "estado": pago.estado},
+            excluir_usuario_ids=[request.user.id],
         )
 
         return Response(PagoTallerSerializer(pago).data)
@@ -1286,6 +1470,17 @@ class FacturaViewSet(viewsets.ModelViewSet):
         factura.save(update_fields=["html_generado"])
         pago.estado = EstadoPagoTaller.FACTURADO
         pago.save(update_fields=["estado", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=destinatarios_pago_o_venta(factura),
+            titulo="Factura emitida",
+            mensaje=f"Se emitió la factura {factura.numero} por Bs {factura.total}.",
+            tipo="factura_emitida",
+            entidad_tipo="Factura",
+            entidad_id=factura.id,
+            data={"factura_id": str(factura.id), "numero": factura.numero},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(FacturaSerializer(factura).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="visualizar")

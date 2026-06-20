@@ -18,6 +18,10 @@ from modulos.administracion_acceso_configuracion.services.auditoria_service impo
     registrar_evento_on_commit,
     AccionAuditoria,
 )
+from modulos.comunicacion_control_inteligencia.services import (
+    notificar_usuarios_on_commit,
+    obtener_usuarios_roles,
+)
 
 
 class IsAuthenticatedTenant(permissions.BasePermission):
@@ -74,6 +78,17 @@ class BackupEmpresaViewSet(viewsets.ReadOnlyModelViewSet):
             descripcion='Backup manual ejecutado',
             metadata={'tipo': backup.tipo, 'estado': backup.estado},
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=list(obtener_usuarios_roles(request.tenant, ["ADMIN"])),
+            titulo="Backup manual ejecutado",
+            mensaje=f"Se ejecutó un backup manual con estado {backup.estado}.",
+            tipo="backup_manual_ejecutado",
+            entidad_tipo="BackupEmpresa",
+            entidad_id=backup.id,
+            data={"backup_id": str(backup.id), "estado": backup.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
 
         return Response(BackupEmpresaSerializer(backup).data, status=status.HTTP_201_CREATED)
 
@@ -108,12 +123,35 @@ class BackupEmpresaViewSet(viewsets.ReadOnlyModelViewSet):
             descripcion='Programacion de backup actualizada',
             metadata={'activo': prog.activo, 'frecuencia': prog.frecuencia, 'intervalo_dias': prog.intervalo_dias},
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=list(obtener_usuarios_roles(request.tenant, ["ADMIN"])),
+            titulo="Programación de backup actualizada",
+            mensaje=f"Se actualizó la programación de backups. Activo: {'sí' if prog.activo else 'no'}.",
+            tipo="backup_programacion_actualizada",
+            entidad_tipo="ProgramacionBackupEmpresa",
+            entidad_id=prog.id,
+            data={"programacion_id": str(prog.id), "activo": str(prog.activo)},
+            excluir_usuario_ids=[request.user.id],
+        )
 
         return Response(ProgramacionBackupSerializer(prog).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'], url_path='ejecutar-pendientes')
     def ejecutar_pendientes(self, request, **kwargs):
         created = BackupService.run_due_backups_for_empresa(request.tenant, force=True)
+        if created:
+            notificar_usuarios_on_commit(
+                empresa=request.tenant,
+                usuarios=list(obtener_usuarios_roles(request.tenant, ["ADMIN"])),
+                titulo="Backups pendientes ejecutados",
+                mensaje=f"Se ejecutaron {len(created)} backups pendientes o forzados.",
+                tipo="backups_pendientes_ejecutados",
+                entidad_tipo="BackupEmpresa",
+                entidad_id=created[0].id,
+                data={"cantidad": str(len(created))},
+                excluir_usuario_ids=[request.user.id],
+            )
         return Response({'ejecutados': len(created)}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'], url_path='descargar')
@@ -189,6 +227,17 @@ class BackupEmpresaViewSet(viewsets.ReadOnlyModelViewSet):
             entidad_id=str(backup.id),
             descripcion='Restauracion de backup ejecutada',
             metadata={'backup_id': str(backup.id), 'resultado': resultado},
+        )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=list(obtener_usuarios_roles(request.tenant, ["ADMIN"])),
+            titulo="Restauración de backup ejecutada",
+            mensaje="Se completó una restauración de backup sobre la empresa actual.",
+            tipo="backup_restaurado",
+            entidad_tipo="BackupEmpresa",
+            entidad_id=backup.id,
+            data={"backup_id": str(backup.id)},
+            excluir_usuario_ids=[request.user.id],
         )
 
         return Response(

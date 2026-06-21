@@ -41,8 +41,8 @@ class AIService:
         context_str = "\n".join(context_lines)
 
         router_prompt = f"""Clasifica el ÚLTIMO mensaje del usuario en uno de estos módulos de un SaaS de Taller Mecánico.
-  IMPORTANTE: "agregar/crear/registrar un servicio" SIN mencionar vehículo/auto/placa -> CONFIGURACION (catálogo del taller).
-  IMPORTANTE: Palabras como "repuesto", "insumo", "producto", "tornillo", "llanta", "aceite" o menciones a "inventario" y "stock" -> INVENTARIO. No lo confundas con CONFIGURACION.
+  IMPORTANTE: Clasifica como CONFIGURACION (catálogo de servicios) SOLO si el usuario dice literalmente "servicio", "horario", "espacio" o "nombre de empresa".
+  IMPORTANTE: Palabras como "item", "ítem", "unitem", "repuesto", "insumo", "producto", "pieza", "tornillo", "llanta", o menciones a "inventario" y "stock" -> INVENTARIO. NUNCA lo mandes a CONFIGURACION.
   Clasifica como VEHICULOS_PLANES si se habla explícitamente de autos, placas, propietarios, dueños, o planes de mantenimiento de un vehículo.
   
   Módulos:

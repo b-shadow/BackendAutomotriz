@@ -179,7 +179,8 @@ class IAViewSet(viewsets.ModelViewSet):
             "espacios_list": espacios_list,
             "categorias_list": categorias_list,
             "usuarios_list": usuarios_list,
-            "roles_list": roles_list
+            "roles_list": roles_list,
+            "current_form_data": accion_pendiente.parametros if accion_pendiente else {}
         }
         
         ai_res = ai_service.get_chat_response(mensajes_ia, user_context=contexto)

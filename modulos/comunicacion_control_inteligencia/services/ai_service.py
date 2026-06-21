@@ -161,7 +161,11 @@ Responde SOLO con el módulo correspondiente."""
         Construye el prompt de sistema inyectando solo las reglas y contexto necesarios para el intent.
         """
         # Contexto Base (siempre necesario)
-        base_context = f"Empresa: {context.get('tenant_name')}\nUsuario: {context.get('user_name')} ({context.get('user_role')})\n" if context else ""
+        if context:
+            form_data_str = str(context.get('current_form_data', {}))
+            base_context = f"Empresa: {context.get('tenant_name')}\nUsuario: {context.get('user_name')} ({context.get('user_role')})\nDATOS DEL FORMULARIO YA RECOLECTADOS Y GUARDADOS: {form_data_str} (¡NO VUELVAS A PREGUNTAR AL USUARIO POR ESTOS DATOS, YA LOS TIENES!)"
+        else:
+            base_context = ""
         
         # Reglas de Oro Generales
         prompt = f"""

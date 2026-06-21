@@ -1965,23 +1965,71 @@ class ReportesViewSet(viewsets.ViewSet):
         safe_filters = {}
         for k, v in filtros_dict.items():
             if isinstance(v, list):
-                # Si es una lista, usar el operador __in
-                safe_filters[f"{k}__in"] = [str(item).strip() for item in v]
+                safe_filters[f"{k}__in"] = [item for item in v if item not in ["", None]]
+            elif isinstance(v, (bool, int, float)) or v is None:
+                safe_filters[k] = v
             else:
                 safe_filters[k] = str(v).strip()
         
-        qs = None
-        if vista == "vehiculos_citas":
+        vistas = {
+            "vehiculos_citas": lambda: Cita.objects.filter(empresa=empresa).select_related("vehiculo", "cliente", "asesor_responsable"),
+            "citas_servicios": lambda: CitaDetalle.objects.filter(empresa=empresa).select_related("cita__vehiculo", "servicio_catalogo"),
+            "clientes_ventas": lambda: VentaMostrador.objects.filter(empresa=empresa).select_related("cliente_usuario", "vendido_por"),
+            "vehiculos": lambda: Vehiculo.objects.filter(empresa=empresa).select_related("propietario"),
+            "citas": lambda: Cita.objects.filter(empresa=empresa).select_related("vehiculo", "cliente", "asesor_responsable"),
+            "cita_detalles": lambda: CitaDetalle.objects.filter(empresa=empresa).select_related("cita__vehiculo", "servicio_catalogo"),
+            "planes_detalle": lambda: PlanServicioDetalle.objects.filter(empresa=empresa).select_related("plan_servicio__vehiculo", "servicio_catalogo", "recomendado_por"),
+            "presupuestos": lambda: PresupuestoCita.objects.filter(empresa=empresa).select_related("cita__vehiculo", "cita__cliente", "comunicado_por"),
+            "ordenes_globales": lambda: OrdenTrabajoGlobal.objects.filter(empresa=empresa).select_related("cita__vehiculo", "cita__cliente", "asesor_responsable"),
+            "ordenes_detalle": lambda: OrdenTrabajoDetalle.objects.filter(empresa=empresa).select_related("orden_global__cita__vehiculo", "servicio_catalogo", "mecanico_asignado", "plan_detalle"),
+            "recepciones": lambda: RecepcionVehiculo.objects.filter(empresa=empresa).select_related("cita__vehiculo", "asesor_registra", "recogido_por"),
+            "avances": lambda: AvanceVehiculo.objects.filter(empresa=empresa).select_related("cita__vehiculo", "orden_detalle", "registrado_por"),
+            "usuarios": lambda: Usuario.objects.filter(empresa=empresa).select_related("rol"),
+            "ventas": lambda: VentaMostrador.objects.filter(empresa=empresa).select_related("cliente_usuario", "vendido_por"),
+            "compras": lambda: Compra.objects.filter(empresa=empresa).select_related("proveedor", "registrado_por"),
+            "proveedores": lambda: Proveedor.objects.filter(empresa=empresa),
+            "pagos_taller": lambda: PagoTaller.objects.filter(empresa=empresa).select_related("cita__vehiculo", "venta", "registrado_por"),
+            "items_inventario": lambda: ItemInventario.objects.filter(empresa=empresa).select_related("categoria"),
+            "movimientos_inventario": lambda: MovimientoInventario.objects.filter(empresa=empresa).select_related("item_inventario", "registrado_por"),
+            "solicitudes_repuesto": lambda: SolicitudRepuesto.objects.filter(empresa=empresa).select_related("cita__vehiculo", "orden_global", "solicitado_por", "aprobado_por_asesor"),
+            "solicitudes_repuesto_detalle": lambda: SolicitudRepuestoDetalle.objects.filter(empresa=empresa).select_related("solicitud__cita__vehiculo", "item_inventario", "recibido_taller_por"),
+            "vehiculos_en_taller": lambda: Cita.objects.filter(
+                empresa=empresa,
+                estado__in=[EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO],
+            ).select_related("vehiculo", "cliente", "asesor_responsable"),
+            "items_stock_bajo": lambda: ItemInventario.objects.filter(
+                empresa=empresa,
+                stock_actual__lte=models.F("stock_minimo"),
+            ).select_related("categoria"),
+            "solicitudes_repuesto_activas": lambda: SolicitudRepuesto.objects.filter(empresa=empresa).exclude(
+                estado__in=[
+                    EstadoSolicitudRepuesto.ENTREGADA,
+                    EstadoSolicitudRepuesto.CERRADA,
+                    EstadoSolicitudRepuesto.RECHAZADA_POR_ASESOR,
+                ]
+            ).select_related("cita__vehiculo", "orden_global", "solicitado_por", "aprobado_por_asesor"),
+            "solicitudes_detalle_pendientes": lambda: SolicitudRepuestoDetalle.objects.filter(empresa=empresa).exclude(
+                estado__in=[
+                    EstadoSolicitudRepuestoDetalle.ENTREGADO,
+                    EstadoSolicitudRepuestoDetalle.CANCELADO,
+                ]
+            ).select_related("solicitud__cita__vehiculo", "item_inventario", "recibido_taller_por"),
+        }
+
+        qs = vistas[vista]() if vista in vistas else None
+        if qs is None and vista == "vehiculos_citas":
             qs = Cita.objects.filter(empresa=empresa).select_related('vehiculo', 'cliente')
-        elif vista == "citas_servicios":
+        elif qs is None and vista == "citas_servicios":
             # Nota: Necesitamos importar CitaDetalle si no está, asumiendo que podemos usar Cita.detalles
             qs = Cita.objects.filter(empresa=empresa).prefetch_related('detalles__servicio_catalogo')
-        elif vista == "clientes_ventas":
+        elif qs is None and vista == "clientes_ventas":
             qs = VentaMostrador.objects.filter(empresa=empresa).select_related('vendedor')
             # Las ventas rapidas no tienen cliente asociado al usuario normalmente, pero es un ejemplo
         else:
             # Fallbacks a tablas simples
-            if vista == "vehiculos":
+            if qs is not None:
+                pass
+            elif vista == "vehiculos":
                 qs = Vehiculo.objects.filter(empresa=empresa)
             elif vista == "citas":
                 qs = Cita.objects.filter(empresa=empresa)

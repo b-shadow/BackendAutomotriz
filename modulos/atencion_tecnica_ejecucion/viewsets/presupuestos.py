@@ -42,6 +42,7 @@ from modulos.administracion_acceso_configuracion.services.auditoria_service impo
     registrar_evento_on_commit,
     AccionAuditoria,
 )
+from modulos.comunicacion_control_inteligencia.services import notificar_usuarios_on_commit
 
 ESTADOS_PAGO_CONFIRMADOS = [
     EstadoPagoTaller.CONFIRMADO,
@@ -106,6 +107,38 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         if rol_nombre == 'USUARIO':
             qs = qs.filter(cita__cliente=self.request.user)
         return qs
+
+    def _destinatarios_presupuesto(self, presupuesto):
+        return [presupuesto.cita.cliente, presupuesto.cita.asesor_responsable]
+
+    def _notificar_estado_presupuesto(self, presupuesto, request, nuevo_estado, extra=None):
+        titulo_map = {
+            EstadoPresupuestoCita.BORRADOR: "Presupuesto en borrador",
+            EstadoPresupuestoCita.COMUNICADO: "Presupuesto comunicado",
+            EstadoPresupuestoCita.APROBADO: "Presupuesto aprobado",
+            EstadoPresupuestoCita.RECHAZADO: "Presupuesto rechazado",
+            EstadoPresupuestoCita.AJUSTADO: "Presupuesto ajustado",
+            EstadoPresupuestoCita.CERRADO: "Presupuesto cerrado",
+        }
+        mensaje_map = {
+            EstadoPresupuestoCita.BORRADOR: f"Se creó un presupuesto para la cita {presupuesto.cita.id}.",
+            EstadoPresupuestoCita.COMUNICADO: f"El presupuesto de tu cita por Bs {presupuesto.total} ya está disponible.",
+            EstadoPresupuestoCita.APROBADO: "El presupuesto fue aprobado y puede avanzar a ejecución.",
+            EstadoPresupuestoCita.RECHAZADO: f"El presupuesto fue rechazado. {(extra or {}).get('motivo_rechazo') or ''}".strip(),
+            EstadoPresupuestoCita.AJUSTADO: "El presupuesto fue ajustado y requiere revisión.",
+            EstadoPresupuestoCita.CERRADO: "El presupuesto fue cerrado.",
+        }
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_presupuesto(presupuesto),
+            titulo=titulo_map.get(nuevo_estado, "Actualización de presupuesto"),
+            mensaje=mensaje_map.get(nuevo_estado, "El presupuesto cambió de estado."),
+            tipo=f"presupuesto_{str(nuevo_estado).lower()}",
+            entidad_tipo="PresupuestoCita",
+            entidad_id=presupuesto.id,
+            data={"presupuesto_id": str(presupuesto.id), "estado": nuevo_estado},
+            excluir_usuario_ids=[request.user.id],
+        )
 
     def _recalcular_totales(self, presupuesto):
         subtotal = Decimal('0.00')
@@ -263,6 +296,7 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             descripcion='Presupuesto creado',
             metadata={'cita_id': str(cita.id), 'estado': presupuesto.estado},
         )
+        self._notificar_estado_presupuesto(presupuesto, request, EstadoPresupuestoCita.BORRADOR)
 
         return Response(PresupuestoCitaSerializer(presupuesto).data, status=status.HTTP_201_CREATED)
 
@@ -322,6 +356,7 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             descripcion=f'Presupuesto cambió a {nuevo_estado}',
             metadata=extra or {},
         )
+        self._notificar_estado_presupuesto(presupuesto, request, nuevo_estado, extra=extra)
 
         return Response(PresupuestoCitaSerializer(presupuesto).data, status=status.HTTP_200_OK)
 
@@ -467,6 +502,17 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
                     'id_pago_proveedor', 'id_transaccion_proveedor', 'qr_imagen_url', 'qr_imagen_base64',
                     'url_pago', 'qr_payload', 'respuesta_proveedor_raw', 'updated_at'
                 ])
+            notificar_usuarios_on_commit(
+                empresa=request.tenant,
+                usuarios=self._destinatarios_presupuesto(presupuesto),
+                titulo="Pago QR generado",
+                mensaje=f"Se generó un pago QR por Bs {monto_real} para el presupuesto.",
+                tipo="presupuesto_pago_qr_generado",
+                entidad_tipo="PresupuestoCita",
+                entidad_id=presupuesto.id,
+                data={"presupuesto_id": str(presupuesto.id), "pago_id": str(pago.id)},
+                excluir_usuario_ids=[request.user.id],
+            )
             return Response({
                 'codigoPago': pago.codigo_pago,
                 'pagoId': str(pago.id),
@@ -556,6 +602,17 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             descripcion='Pago simulado registrado',
             metadata={'monto': str(monto), 'pagado_total': str(nuevo_pagado)},
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_presupuesto(presupuesto),
+            titulo="Pago registrado",
+            mensaje=f"Se registró un pago de Bs {monto} para el presupuesto de la cita.",
+            tipo="presupuesto_pago_registrado",
+            entidad_tipo="PresupuestoCita",
+            entidad_id=presupuesto.id,
+            data={"presupuesto_id": str(presupuesto.id), "monto": str(monto)},
+            excluir_usuario_ids=[request.user.id],
+        )
 
         return Response(
             {
@@ -620,6 +677,17 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
             descripcion='Presupuesto marcado como pagado en efectivo',
             metadata={'monto': str(monto)},
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_presupuesto(presupuesto),
+            titulo="Pago en efectivo recibido",
+            mensaje=f"Se registró un pago en efectivo de Bs {monto} para el presupuesto.",
+            tipo="presupuesto_pago_efectivo",
+            entidad_tipo="PresupuestoCita",
+            entidad_id=presupuesto.id,
+            data={"presupuesto_id": str(presupuesto.id), "monto": str(monto)},
+            excluir_usuario_ids=[request.user.id],
+        )
 
         nuevo_pagado = self._monto_pagado(presupuesto)
         nuevo_pendiente = total - nuevo_pagado
@@ -628,6 +696,7 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         if nuevo_pendiente == Decimal('0.00') and presupuesto.estado == EstadoPresupuestoCita.APROBADO:
             presupuesto.estado = EstadoPresupuestoCita.CERRADO
             presupuesto.save(update_fields=['estado', 'updated_at'])
+            self._notificar_estado_presupuesto(presupuesto, request, EstadoPresupuestoCita.CERRADO)
 
         return Response(
             {
@@ -727,6 +796,17 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         pago.url_pago = session.url
         pago.respuesta_proveedor_raw = {'checkout_session_id': session.id}
         pago.save(update_fields=['id_pago_proveedor', 'url_pago', 'respuesta_proveedor_raw', 'updated_at'])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_presupuesto(presupuesto),
+            titulo="Pago con tarjeta iniciado",
+            mensaje=f"Se inició un pago con tarjeta por Bs {monto_real} para el presupuesto.",
+            tipo="presupuesto_pago_tarjeta_iniciado",
+            entidad_tipo="PresupuestoCita",
+            entidad_id=presupuesto.id,
+            data={"presupuesto_id": str(presupuesto.id), "pago_id": str(pago.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
 
         return Response(
             {
@@ -788,6 +868,19 @@ class PresupuestoCitaViewSet(viewsets.ModelViewSet):
         if nuevo_pendiente == Decimal('0.00') and presupuesto.estado == EstadoPresupuestoCita.APROBADO:
             presupuesto.estado = EstadoPresupuestoCita.CERRADO
             presupuesto.save(update_fields=['estado', 'updated_at'])
+            self._notificar_estado_presupuesto(presupuesto, request, EstadoPresupuestoCita.CERRADO)
+
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_presupuesto(presupuesto),
+            titulo="Pago con tarjeta confirmado",
+            mensaje=f"Se confirmó el pago con tarjeta del presupuesto por Bs {pago.monto_total}.",
+            tipo="presupuesto_pago_tarjeta_confirmado",
+            entidad_tipo="PresupuestoCita",
+            entidad_id=presupuesto.id,
+            data={"presupuesto_id": str(presupuesto.id), "pago_id": str(pago.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
 
         return Response(
             {

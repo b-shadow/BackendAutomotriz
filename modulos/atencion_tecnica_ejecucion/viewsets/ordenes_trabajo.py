@@ -20,6 +20,7 @@ from modulos.administracion_acceso_configuracion.services.auditoria_service impo
     AccionAuditoria,
 )
 from modulos.atencion_tecnica_ejecucion.services.ordenes_trabajo import OrdenTrabajoService
+from modulos.comunicacion_control_inteligencia.services import notificar_usuarios_on_commit
 
 
 class IsAuthenticatedTenant(permissions.BasePermission):
@@ -122,6 +123,18 @@ class OrdenTrabajoViewSet(viewsets.ModelViewSet):
             orden.estado = EstadoOrdenTrabajoGlobal.ASIGNADA
             orden.save(update_fields=["estado", "updated_at"])
 
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=[mec for mec, _ in mecanicos] + [orden.cita.cliente, orden.asesor_responsable],
+            titulo="Orden de trabajo asignada",
+            mensaje=f"La orden {orden.numero} recibió asignación de mecánicos.",
+            tipo="orden_asignada",
+            entidad_tipo="OrdenTrabajoGlobal",
+            entidad_id=orden.id,
+            data={"orden_id": str(orden.id), "estado": orden.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
+
         return Response(OrdenTrabajoGlobalSerializer(orden).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="asignar-detalles")
@@ -149,6 +162,18 @@ class OrdenTrabajoViewSet(viewsets.ModelViewSet):
                 continue
             detalle.mecanico_asignado = mec
             detalle.save(update_fields=["mecanico_asignado", "updated_at"])
+        mecanicos_detalle = [d.mecanico_asignado for d in orden.detalles.select_related("mecanico_asignado") if d.mecanico_asignado_id]
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=mecanicos_detalle + [orden.asesor_responsable],
+            titulo="Detalle de orden actualizado",
+            mensaje=f"Se actualizaron asignaciones de servicios en la orden {orden.numero}.",
+            tipo="orden_detalles_asignados",
+            entidad_tipo="OrdenTrabajoGlobal",
+            entidad_id=orden.id,
+            data={"orden_id": str(orden.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(OrdenTrabajoGlobalSerializer(orden).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="iniciar")
@@ -163,6 +188,18 @@ class OrdenTrabajoViewSet(viewsets.ModelViewSet):
             )
         orden.estado = EstadoOrdenTrabajoGlobal.EN_PROCESO
         orden.save(update_fields=["estado", "updated_at"])
+        mecanicos = [rel.mecanico for rel in orden.mecanicos_asignados.select_related("mecanico").all()]
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=mecanicos + [orden.cita.cliente, orden.asesor_responsable],
+            titulo="Orden en proceso",
+            mensaje=f"La orden {orden.numero} inició su ejecución en taller.",
+            tipo="orden_en_proceso",
+            entidad_tipo="OrdenTrabajoGlobal",
+            entidad_id=orden.id,
+            data={"orden_id": str(orden.id), "estado": orden.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(OrdenTrabajoGlobalSerializer(orden).data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"], url_path="mecanicos-disponibles")

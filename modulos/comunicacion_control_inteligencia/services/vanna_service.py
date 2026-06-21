@@ -212,6 +212,65 @@ class VannaAutomotrizService(VannaBase):
             user_text = prompt
 
         q = (user_text or "").lower()
+        # Consultas de usuarios: forzar SQL simple y estable para evitar mezclas con otros módulos.
+        if (
+            ("usuario" in q or "usuarios" in q)
+            and not any(k in q for k in ["cita", "vehiculo", "vehículos", "orden", "mecanic", "servicio", "pago", "factura", "venta"])
+        ):
+            return (
+                "SELECT u.nombres, u.apellidos, u.email, r.nombre AS rol, u.is_active "
+                "FROM usuarios u "
+                "LEFT JOIN roles r ON r.id = u.rol_id "
+                f"WHERE u.empresa_id = '{self.tenant_id}' "
+                "ORDER BY u.nombres ASC, u.apellidos ASC"
+            )
+        if (
+            ("todas las citas" in q)
+            or ("ver citas" in q)
+            or ("listar citas" in q)
+        ):
+            return (
+                "SELECT "
+                "c.id AS cita_id, "
+                "v.placa AS vehiculo, "
+                "u.nombres || ' ' || COALESCE(u.apellidos, '') AS cliente, "
+                "c.fecha_hora_inicio_programada AS fecha_programada, "
+                "c.fecha_hora_fin_programada AS fecha_fin_programada, "
+                "c.duracion_estimada_min AS duracion_estimada, "
+                "c.estado AS estado_cita, "
+                "COALESCE(sc.nombre, 'SIN_SERVICIO') AS servicio, "
+                "cd.tiempo_estandar_min AS tiempo_estandar, "
+                "cd.precio_referencial AS precio_unitario, "
+                "cd.precio_referencial AS subtotal "
+                "FROM citas c "
+                "JOIN vehiculos v ON c.vehiculo_id = v.id "
+                "LEFT JOIN usuarios u ON c.cliente_id = u.id "
+                "LEFT JOIN citas_detalles cd ON c.id = cd.cita_id "
+                "LEFT JOIN servicios_catalogo sc ON sc.id = cd.servicio_catalogo_id "
+                f"WHERE c.empresa_id = '{self.tenant_id}' "
+                "ORDER BY c.fecha_hora_inicio_programada DESC"
+            )
+        if (
+            ("ingresos" in q and "todos" in q)
+            or ("ver ingresos" in q)
+            or ("listar ingresos" in q)
+        ):
+            return (
+                "SELECT "
+                "p.tipo_origen, "
+                "p.monto_total, "
+                "p.fecha_pago, "
+                "COALESCE(v.placa, '-') AS vehiculo, "
+                "COALESCE(u.nombres || ' ' || u.apellidos, '-') AS cliente "
+                "FROM pagos_taller p "
+                "LEFT JOIN citas c ON p.cita_id = c.id "
+                "LEFT JOIN vehiculos v ON c.vehiculo_id = v.id "
+                "LEFT JOIN usuarios u ON c.cliente_id = u.id "
+                f"WHERE p.empresa_id = '{self.tenant_id}' "
+                "AND p.estado != 'ANULADO' "
+                "ORDER BY COALESCE(p.fecha_pago, p.created_at) DESC"
+            )
+
         if ("plan de vehiculo" in q or "plan del vehiculo" in q) and "placa" in q:
             m = re.search(r"placa\s+([a-zA-Z0-9\-]+)", user_text, flags=re.IGNORECASE)
             if not m:
@@ -1063,11 +1122,23 @@ class VannaAutomotrizService(VannaBase):
         # `ordenes_trabajo_detalle` referencias reales.
         fixed_sql = re.sub(r"\bod\.servicio_id\b", "od.servicio_catalogo_id", fixed_sql, flags=re.IGNORECASE)
         fixed_sql = re.sub(r"\bordenes_trabajo_detalle\.servicio_id\b", "ordenes_trabajo_detalle.servicio_catalogo_id", fixed_sql, flags=re.IGNORECASE)
+        # `ordenes_trabajo_detalle` NO tiene `cita_id`; la relación correcta es
+        # od.orden_global_id -> ordenes_trabajo_global.cita_id -> citas.id
+        fixed_sql = re.sub(
+            r"JOIN\s+ordenes_trabajo_detalle\s+od\s+ON\s+c\.id\s*=\s*od\.cita_id",
+            "JOIN ordenes_trabajo_global og ON og.cita_id = c.id JOIN ordenes_trabajo_detalle od ON od.orden_global_id = og.id",
+            fixed_sql,
+            flags=re.IGNORECASE,
+        )
+        fixed_sql = re.sub(r"\bod\.cita_id\b", "og.cita_id", fixed_sql, flags=re.IGNORECASE)
         fixed_sql = re.sub(r"\bod\.descripcion\b", "COALESCE(od.observaciones_mecanico, od.observaciones_asesor)", fixed_sql, flags=re.IGNORECASE)
         fixed_sql = re.sub(r"\bod\.fecha_realizacion\b", "od.fin_real", fixed_sql, flags=re.IGNORECASE)
         # `planes_servicio_vehiculo` no tiene `nombre`.
         fixed_sql = re.sub(r"\bp\.nombre\b", "p.descripcion_general", fixed_sql, flags=re.IGNORECASE)
         fixed_sql = re.sub(r"\bplanes_servicio_vehiculo\.nombre\b", "planes_servicio_vehiculo.descripcion_general", fixed_sql, flags=re.IGNORECASE)
+        # `planes_servicio_vehiculo` tampoco tiene `descripcion`; usar `descripcion_general`.
+        fixed_sql = re.sub(r"\bp\.descripcion\b", "p.descripcion_general", fixed_sql, flags=re.IGNORECASE)
+        fixed_sql = re.sub(r"\bplanes_servicio_vehiculo\.descripcion\b", "planes_servicio_vehiculo.descripcion_general", fixed_sql, flags=re.IGNORECASE)
         # Si intenta unir vehiculo directo desde ordenes_trabajo_detalle (no existe vehiculo_id),
         # rehacer JOIN por orden_global -> cita -> vehiculo.
         fixed_sql = re.sub(
@@ -1083,6 +1154,83 @@ class VannaAutomotrizService(VannaBase):
             fixed_sql,
             flags=re.IGNORECASE,
         )
+        return fixed_sql
+
+    def repair_sql_with_error(self, sql: str, error_message: str) -> str:
+        """
+        Intenta corregir SQL usando el mensaje de error de PostgreSQL.
+        Devuelve SQL corregido o el original si no aplica ningún parche.
+        """
+        if not sql:
+            return sql
+        fixed_sql = self._sanitize_sql(sql)
+        err = (error_message or "").lower()
+
+        # Caso: presupuestos_detalle no tiene cita_detalle_id.
+        if "pd.cita_detalle_id" in fixed_sql.lower() or "cita_detalle_id does not exist" in err:
+            fixed_sql = re.sub(
+                r"JOIN\s+presupuestos_detalle\s+pd\s+ON\s+c\.id\s*=\s*pd\.cita_detalle_id",
+                "JOIN presupuestos_cita pc ON pc.cita_id = c.id JOIN presupuestos_detalle pd ON pd.presupuesto_id = pc.id",
+                fixed_sql,
+                flags=re.IGNORECASE,
+            )
+            fixed_sql = re.sub(
+                r"\bpd\.cita_detalle_id\b",
+                "pc.cita_id",
+                fixed_sql,
+                flags=re.IGNORECASE,
+            )
+
+        # Caso: od.cita_id no existe en ordenes_trabajo_detalle.
+        if "od.cita_id" in fixed_sql.lower() or "od.cita_id does not exist" in err:
+            fixed_sql = re.sub(
+                r"JOIN\s+ordenes_trabajo_detalle\s+od\s+ON\s+c\.id\s*=\s*od\.cita_id",
+                "JOIN ordenes_trabajo_global og ON og.cita_id = c.id JOIN ordenes_trabajo_detalle od ON od.orden_global_id = og.id",
+                fixed_sql,
+                flags=re.IGNORECASE,
+            )
+            fixed_sql = re.sub(r"\bod\.cita_id\b", "og.cita_id", fixed_sql, flags=re.IGNORECASE)
+
+        # Caso: citas_detalles no tiene descripcion ni subtotal.
+        if (
+            "cd.descripcion does not exist" in err
+            or "column cd.descripcion does not exist" in err
+            or "cd.descripcion" in fixed_sql.lower()
+        ):
+            fixed_sql = re.sub(r"\bcd\.descripcion\b", "COALESCE(sc.nombre, 'SIN_SERVICIO')", fixed_sql, flags=re.IGNORECASE)
+            if re.search(r"\bfrom\s+citas\b", fixed_sql, flags=re.IGNORECASE) and not re.search(r"\bjoin\s+servicios_catalogo\s+sc\b", fixed_sql, flags=re.IGNORECASE):
+                fixed_sql = re.sub(
+                    r"(JOIN\s+citas_detalles\s+cd\s+ON\s+c\.id\s*=\s*cd\.cita_id)",
+                    r"\1 LEFT JOIN servicios_catalogo sc ON sc.id = cd.servicio_catalogo_id",
+                    fixed_sql,
+                    flags=re.IGNORECASE,
+                )
+        if (
+            "cd.subtotal does not exist" in err
+            or "column cd.subtotal does not exist" in err
+            or "cd.subtotal" in fixed_sql.lower()
+        ):
+            fixed_sql = re.sub(r"\bcd\.subtotal\b", "cd.precio_referencial", fixed_sql, flags=re.IGNORECASE)
+
+        # Caso: planes_servicio_vehiculo usando columna inexistente `descripcion`.
+        if "column p.descripcion does not exist" in err or "p.descripcion does not exist" in err:
+            fixed_sql = re.sub(r"\bp\.descripcion\b", "p.descripcion_general", fixed_sql, flags=re.IGNORECASE)
+
+        # Caso: join usa alias c antes de declararlo.
+        if "missing from-clause entry for table \"c\"" in err:
+            fixed_sql = re.sub(
+                r"JOIN\s+vehiculos\s+v\s+ON\s+p\.cita_id\s*=\s*c\.id\s+AND\s+c\.vehiculo_id\s*=\s*v\.id\s+JOIN\s+citas\s+c\s+ON\s+p\.cita_id\s*=\s*c\.id",
+                "JOIN citas c ON p.cita_id = c.id JOIN vehiculos v ON c.vehiculo_id = v.id",
+                fixed_sql,
+                flags=re.IGNORECASE,
+            )
+            fixed_sql = re.sub(
+                r"JOIN\s+vehiculos\s+v\s+ON\s+p\.cita_id\s*=\s*c\.id\s+AND\s+c\.vehiculo_id\s*=\s*v\.id",
+                "JOIN citas c ON p.cita_id = c.id JOIN vehiculos v ON c.vehiculo_id = v.id",
+                fixed_sql,
+                flags=re.IGNORECASE,
+            )
+
         return fixed_sql
     def run_sql(self, sql: str) -> Any:
         """

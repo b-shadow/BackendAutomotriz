@@ -36,6 +36,7 @@ from modulos.administracion_acceso_configuracion.services.auditoria_service impo
     registrar_evento_desde_request,
     AccionAuditoria,
 )
+from modulos.comunicacion_control_inteligencia.services import notificar_usuarios_on_commit
 
 
 # ============================================================================
@@ -187,6 +188,17 @@ class RecepcionVehiculoViewSet(viewsets.ModelViewSet):
                 "combustible": recepcion.nivel_combustible,
             },
         )
+        notificar_usuarios_on_commit(
+            empresa=recepcion.empresa,
+            usuarios=[recepcion.cita.cliente, recepcion.cita.asesor_responsable],
+            titulo="Vehículo recibido en taller",
+            mensaje=f"Se registró la recepción del vehículo {recepcion.cita.vehiculo.placa if recepcion.cita.vehiculo else 'sin placa'}.",
+            tipo="recepcion_registrada",
+            entidad_tipo="RecepcionVehiculo",
+            entidad_id=recepcion.id,
+            data={"cita_id": str(recepcion.cita.id)},
+            excluir_usuario_ids=[self.request.user.id],
+        )
 
     def perform_update(self, serializer):
         """Actualiza recepciÃ³n y registra auditorÃ­a."""
@@ -306,6 +318,17 @@ class RecepcionVehiculoViewSet(viewsets.ModelViewSet):
         recepcion.fecha_recogida = timezone.now()
         recepcion.recogido_por = request.user
         recepcion.save(update_fields=["fecha_recogida", "recogido_por", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=recepcion.empresa,
+            usuarios=[recepcion.cita.cliente, recepcion.cita.asesor_responsable],
+            titulo="Vehículo entregado al cliente",
+            mensaje=f"Se marcó la recogida del vehículo {recepcion.cita.vehiculo.placa if recepcion.cita.vehiculo else 'sin placa'}.",
+            tipo="recepcion_recogida",
+            entidad_tipo="RecepcionVehiculo",
+            entidad_id=recepcion.id,
+            data={"cita_id": str(recepcion.cita.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(RecepcionVehiculoDetalleSerializer(recepcion).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"], url_path="cita-info")

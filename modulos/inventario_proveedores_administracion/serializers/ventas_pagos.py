@@ -116,6 +116,10 @@ class PagoTallerSerializer(serializers.ModelSerializer):
 
 class FacturaSerializer(serializers.ModelSerializer):
     """Serializer base para Factura."""
+    pago_estado = serializers.CharField(source="pago_taller.estado", read_only=True)
+    pago_metodo = serializers.CharField(source="pago_taller.metodo_pago", read_only=True)
+    pago_moneda = serializers.CharField(source="pago_taller.moneda", read_only=True)
+    pago_fecha = serializers.DateTimeField(source="pago_taller.fecha_pago", read_only=True)
 
     class Meta:
         model = Factura
@@ -127,7 +131,12 @@ class FacturaSerializer(serializers.ModelSerializer):
             "fecha_emision",
             "nit_razon_social",
             "total",
+            "html_generado",
             "archivo_pdf_url",
+            "pago_estado",
+            "pago_metodo",
+            "pago_moneda",
+            "pago_fecha",
             "created_at",
         ]
         read_only_fields = ["id", "fecha_emision", "created_at"]

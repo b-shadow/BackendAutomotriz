@@ -13,8 +13,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.utils import timezone
 from modulos.administracion_acceso_configuracion.models import Usuario, Rol
 from modulos.administracion_acceso_configuracion.serializers.usuarios import (
+    DesactivarTokenPushSerializer,
+    RegistrarTokenPushSerializer,
     UsuarioListadoSerializer,
     UsuarioCreadoSerializer,
     UsuarioCambiarRolSerializer,
@@ -24,6 +27,11 @@ from modulos.administracion_acceso_configuracion.serializers.usuarios import (
     UsuarioDetalleSerializer,
     UsuarioPreferenciasNotificacionSerializer,
     RolSimplesSerializer,
+)
+from modulos.comunicacion_control_inteligencia.models import DispositivoPush
+from modulos.comunicacion_control_inteligencia.services import (
+    notificar_usuarios_on_commit,
+    obtener_usuarios_roles,
 )
 from modulos.administracion_acceso_configuracion.services.auditoria_service import (
     registrar_evento_desde_request,
@@ -91,6 +99,10 @@ class UsuariosViewSet(viewsets.ModelViewSet):
             return UsuarioCambiarContrasenaSerializer
         elif self.action == "preferencias_notificacion":
             return UsuarioPreferenciasNotificacionSerializer
+        elif self.action == "registrar_token_push":
+            return RegistrarTokenPushSerializer
+        elif self.action == "desactivar_token_push":
+            return DesactivarTokenPushSerializer
         elif self.action in ["update", "partial_update"]:
             return UsuarioEditarSerializer
         return UsuarioDetalleSerializer
@@ -100,7 +112,7 @@ class UsuariosViewSet(viewsets.ModelViewSet):
         - list, retrieve: usuarios autenticados del tenant
         - cambiar_contrasena, partial_update, preferencias_notificacion: usuario autenticado (solo su propio perfil)
         - create, cambiar_rol, desactivar, activar, obtener_roles, update: solo ADMIN"""
-        if self.action in ["list", "retrieve", "cambiar_contrasena", "partial_update", "preferencias_notificacion"]:
+        if self.action in ["list", "retrieve", "cambiar_contrasena", "partial_update", "preferencias_notificacion", "registrar_token_push", "desactivar_token_push"]:
             permission_classes = [IsAuthenticatedTenant]
         elif self.action in ["create", "cambiar_rol", "desactivar", "activar", "obtener_roles", "update", "eliminar"]:
             permission_classes = [IsAdminTenant]
@@ -148,6 +160,18 @@ class UsuariosViewSet(viewsets.ModelViewSet):
         )
         # Retornar usuario creado con todos los datos
         response_serializer = UsuarioDetalleSerializer(usuario)
+        admins = list(obtener_usuarios_roles(request.tenant, ["ADMIN"]))
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=[usuario, *admins],
+            titulo="Nuevo usuario registrado",
+            mensaje=f"Se creó el usuario {usuario.email} con rol {usuario.rol.nombre if usuario.rol else 'SIN ROL'}.",
+            tipo="usuario_creado",
+            entidad_tipo="Usuario",
+            entidad_id=usuario.id,
+            data={"usuario_id": str(usuario.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(
             {
                 "mensaje": "Usuario creado exitosamente",
@@ -187,6 +211,17 @@ class UsuariosViewSet(viewsets.ModelViewSet):
                 "rol_nuevo": usuario.rol.nombre if usuario.rol else None,
             }
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=[usuario],
+            titulo="Tu rol fue actualizado",
+            mensaje=f"Ahora tienes el rol {usuario.rol.nombre if usuario.rol else 'SIN ROL'} en la empresa.",
+            tipo="usuario_rol_actualizado",
+            entidad_tipo="Usuario",
+            entidad_id=usuario.id,
+            data={"usuario_id": str(usuario.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         response_serializer = UsuarioDetalleSerializer(usuario)
         return Response(
             {
@@ -222,6 +257,17 @@ class UsuariosViewSet(viewsets.ModelViewSet):
                 "is_active": usuario.is_active,
             }
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=[usuario],
+            titulo="Tu acceso fue desactivado",
+            mensaje="Un administrador desactivó tu cuenta en la empresa.",
+            tipo="usuario_desactivado",
+            entidad_tipo="Usuario",
+            entidad_id=usuario.id,
+            data={"usuario_id": str(usuario.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         response_serializer = UsuarioDetalleSerializer(usuario)
         return Response(
             {
@@ -256,6 +302,17 @@ class UsuariosViewSet(viewsets.ModelViewSet):
                 "usuario_afectado_email": usuario.email,
                 "is_active": usuario.is_active,
             }
+        )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=[usuario],
+            titulo="Tu acceso fue reactivado",
+            mensaje="Un administrador volvió a activar tu cuenta en la empresa.",
+            tipo="usuario_activado",
+            entidad_tipo="Usuario",
+            entidad_id=usuario.id,
+            data={"usuario_id": str(usuario.id)},
+            excluir_usuario_ids=[request.user.id],
         )
         response_serializer = UsuarioDetalleSerializer(usuario)
         return Response(
@@ -371,6 +428,62 @@ class UsuariosViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_200_OK
             )
+
+    @action(detail=False, methods=["post"], url_path="registrar-token-push")
+    def registrar_token_push(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        token = serializer.validated_data["token"]
+        defaults = {
+            "empresa": request.tenant,
+            "usuario": request.user,
+            "plataforma": serializer.validated_data.get("plataforma", "WEB"),
+            "device_label": serializer.validated_data.get("device_label", ""),
+            "user_agent": serializer.validated_data.get("user_agent") or request.META.get("HTTP_USER_AGENT", ""),
+            "activo": True,
+            "ultimo_registro_at": timezone.now(),
+        }
+
+        dispositivo, created = DispositivoPush.objects.update_or_create(
+            token=token,
+            defaults=defaults,
+        )
+
+        return Response(
+            {
+                "mensaje": "Token push registrado correctamente",
+                "dispositivo_id": str(dispositivo.id),
+                "activo": dispositivo.activo,
+                "created": created,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="desactivar-token-push")
+    def desactivar_token_push(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = serializer.validated_data["token"]
+
+        updated = (
+            DispositivoPush.objects.filter(
+                empresa=request.tenant,
+                usuario=request.user,
+                token=token,
+                activo=True,
+            )
+            .update(activo=False, updated_at=timezone.now())
+        )
+
+        return Response(
+            {
+                "mensaje": "Token push desactivado correctamente",
+                "updated": updated,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     def partial_update(self, request, pk=None, *args, **kwargs):
         """ Editar datos del perfil del usuario (solo si es el usuario autenticado).
         PATCH /api/{slug}/usuarios/{id}/

@@ -5,17 +5,18 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from modulos.atencion_tecnica_ejecucion.models import (
-    OrdenTrabajoGlobal,
-    OrdenTrabajoDetalle,
-    EstadoOrdenTrabajoGlobal,
-    EstadoOrdenTrabajoDetalle,
     AvanceVehiculo,
+    EstadoOrdenTrabajoDetalle,
+    EstadoOrdenTrabajoGlobal,
+    OrdenTrabajoDetalle,
+    OrdenTrabajoGlobal,
     TipoAvanceVehiculo,
 )
 from modulos.atencion_tecnica_ejecucion.serializers.ordenes_trabajo import (
-    OrdenTrabajoGlobalSerializer,
     OrdenTrabajoDetalleSerializer,
+    OrdenTrabajoGlobalSerializer,
 )
+from modulos.comunicacion_control_inteligencia.services import notificar_usuarios_on_commit
 
 
 class IsAuthenticatedTenant(permissions.BasePermission):
@@ -68,7 +69,9 @@ class AvanceTallerViewSet(viewsets.ReadOnlyModelViewSet):
         total = orden.detalles.count()
         if total <= 0:
             return 0
-        resueltos = orden.detalles.filter(estado__in=[EstadoOrdenTrabajoDetalle.FINALIZADO, EstadoOrdenTrabajoDetalle.INNECESARIO]).count()
+        resueltos = orden.detalles.filter(
+            estado__in=[EstadoOrdenTrabajoDetalle.FINALIZADO, EstadoOrdenTrabajoDetalle.INNECESARIO]
+        ).count()
         return int(round((resueltos * 100) / total))
 
     def _registrar_avance(self, request, detalle, estado, mensaje, porcentaje=None):
@@ -85,6 +88,9 @@ class AvanceTallerViewSet(viewsets.ReadOnlyModelViewSet):
             porcentaje_avance=porcentaje,
             visible_cliente=True,
         )
+
+    def _destinatarios_detalle(self, detalle):
+        return [detalle.orden_global.cita.cliente, detalle.orden_global.asesor_responsable, detalle.mecanico_asignado]
 
     @action(detail=True, methods=["post"], url_path="iniciar-detalle")
     @transaction.atomic
@@ -117,6 +123,17 @@ class AvanceTallerViewSet(viewsets.ReadOnlyModelViewSet):
             "EN PROCESO",
             f"Se inició el servicio: {detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else 'Servicio'}.",
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_detalle(detalle),
+            titulo="Servicio iniciado",
+            mensaje=f"El servicio {detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else 'Servicio'} inició en taller.",
+            tipo="orden_detalle_iniciado",
+            entidad_tipo="OrdenTrabajoDetalle",
+            entidad_id=detalle.id,
+            data={"orden_id": str(detalle.orden_global.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(OrdenTrabajoDetalleSerializer(detalle).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="pausar-detalle")
@@ -148,6 +165,17 @@ class AvanceTallerViewSet(viewsets.ReadOnlyModelViewSet):
             detalle,
             "PAUSADO",
             f"Servicio pausado: {motivo or 'en revisión'}",
+        )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_detalle(detalle),
+            titulo="Servicio pausado",
+            mensaje=f"El servicio {detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else 'Servicio'} fue pausado.",
+            tipo="orden_detalle_pausado",
+            entidad_tipo="OrdenTrabajoDetalle",
+            entidad_id=detalle.id,
+            data={"orden_id": str(detalle.orden_global.id)},
+            excluir_usuario_ids=[request.user.id],
         )
         return Response(OrdenTrabajoDetalleSerializer(detalle).data, status=status.HTTP_200_OK)
 
@@ -188,6 +216,17 @@ class AvanceTallerViewSet(viewsets.ReadOnlyModelViewSet):
             "FINALIZADO",
             f"Servicio finalizado: {detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else 'Servicio'}.",
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=[detalle.orden_global.cita.cliente, detalle.orden_global.asesor_responsable],
+            titulo="Servicio finalizado",
+            mensaje=f"Finalizó el servicio {detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else 'Servicio'} de la orden {detalle.orden_global.numero}.",
+            tipo="orden_detalle_finalizado",
+            entidad_tipo="OrdenTrabajoDetalle",
+            entidad_id=detalle.id,
+            data={"orden_id": str(detalle.orden_global.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(OrdenTrabajoDetalleSerializer(detalle).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="marcar-innecesario")
@@ -218,6 +257,17 @@ class AvanceTallerViewSet(viewsets.ReadOnlyModelViewSet):
             "INNECESARIO",
             f"Servicio marcado como no necesario: {motivo or 'sin motivo especificado'}.",
         )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._destinatarios_detalle(detalle),
+            titulo="Servicio marcado como innecesario",
+            mensaje=f"El servicio {detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else 'Servicio'} fue marcado como innecesario.",
+            tipo="orden_detalle_innecesario",
+            entidad_tipo="OrdenTrabajoDetalle",
+            entidad_id=detalle.id,
+            data={"orden_id": str(detalle.orden_global.id)},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(OrdenTrabajoDetalleSerializer(detalle).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="finalizar-orden")
@@ -234,6 +284,15 @@ class AvanceTallerViewSet(viewsets.ReadOnlyModelViewSet):
         orden.estado = EstadoOrdenTrabajoGlobal.FINALIZADA
         orden.fecha_cierre = timezone.now()
         orden.save(update_fields=["estado", "fecha_cierre", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=[orden.cita.cliente, orden.asesor_responsable] + [rel.mecanico for rel in orden.mecanicos_asignados.select_related("mecanico").all()],
+            titulo="Orden de trabajo finalizada",
+            mensaje=f"La orden {orden.numero} fue finalizada en taller.",
+            tipo="orden_finalizada",
+            entidad_tipo="OrdenTrabajoGlobal",
+            entidad_id=orden.id,
+            data={"orden_id": str(orden.id), "estado": orden.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(OrdenTrabajoGlobalSerializer(orden).data, status=status.HTTP_200_OK)
-
-

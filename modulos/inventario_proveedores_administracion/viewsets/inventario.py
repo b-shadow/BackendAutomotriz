@@ -23,6 +23,10 @@ from modulos.inventario_proveedores_administracion.serializers.inventario import
 from modulos.inventario_proveedores_administracion.serializers.solicitudes import (
     SolicitudRepuestoSerializer,
 )
+from modulos.comunicacion_control_inteligencia.services import (
+    notificar_usuarios_on_commit,
+    obtener_usuarios_roles,
+)
 
 
 class IsAuthenticatedTenant(permissions.BasePermission):
@@ -130,6 +134,14 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
     serializer_class = SolicitudRepuestoSerializer
     permission_classes = [IsAuthenticatedTenant]
 
+    def _usuarios_solicitud(self, solicitud):
+        return [
+            solicitud.solicitado_por,
+            solicitud.aprobado_por_asesor,
+            getattr(solicitud.cita, "cliente", None),
+            getattr(solicitud.cita, "asesor_responsable", None),
+        ]
+
     def get_permissions(self):
         if self.action in ["aprobar"]:
             return [IsAuthenticatedTenant(), PuedeGestionarInventario()]
@@ -182,6 +194,17 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
                 estado=EstadoSolicitudRepuestoDetalle.SOLICITADO,
                 observacion=det.get("observacion", ""),
             )
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._usuarios_solicitud(solicitud) + list(obtener_usuarios_roles(request.tenant, ["ADMIN", "ALMACENERO"])),
+            titulo="Nueva solicitud de repuesto",
+            mensaje=f"Se creó una solicitud de repuestos para la cita {solicitud.cita_id}.",
+            tipo="solicitud_repuesto_creada",
+            entidad_tipo="SolicitudRepuesto",
+            entidad_id=solicitud.id,
+            data={"solicitud_id": str(solicitud.id), "estado": solicitud.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_201_CREATED)
 
     def _puede_marcar_recibida_taller(self, request, solicitud):
@@ -205,6 +228,17 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
         solicitud.aprobado_por_asesor = request.user
         solicitud.observaciones_asesor = request.data.get("observaciones_asesor", "")
         solicitud.save(update_fields=["estado", "aprobado_por_asesor", "observaciones_asesor", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._usuarios_solicitud(solicitud),
+            titulo="Solicitud de repuesto aprobada",
+            mensaje="La solicitud de repuesto fue aprobada por asesor.",
+            tipo="solicitud_repuesto_aprobada",
+            entidad_tipo="SolicitudRepuesto",
+            entidad_id=solicitud.id,
+            data={"solicitud_id": str(solicitud.id), "estado": solicitud.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="en-proceso-almacen")
@@ -214,6 +248,17 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
         solicitud.estado = EstadoSolicitudRepuesto.EN_REVISION_ALMACEN
         solicitud.observaciones_almacen = request.data.get("observaciones_almacen", "")
         solicitud.save(update_fields=["estado", "observaciones_almacen", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._usuarios_solicitud(solicitud) + list(obtener_usuarios_roles(request.tenant, ["ALMACENERO"])),
+            titulo="Solicitud en revisión de almacén",
+            mensaje="La solicitud de repuesto pasó a revisión de almacén.",
+            tipo="solicitud_repuesto_revision_almacen",
+            entidad_tipo="SolicitudRepuesto",
+            entidad_id=solicitud.id,
+            data={"solicitud_id": str(solicitud.id), "estado": solicitud.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="marcar-entregada")
@@ -265,6 +310,17 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
 
         solicitud.estado = EstadoSolicitudRepuesto.ENTREGADA
         solicitud.save(update_fields=["estado", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._usuarios_solicitud(solicitud),
+            titulo="Repuestos entregados a taller",
+            mensaje="Se entregaron repuestos asociados a la solicitud del taller.",
+            tipo="solicitud_repuesto_entregada",
+            entidad_tipo="SolicitudRepuesto",
+            entidad_id=solicitud.id,
+            data={"solicitud_id": str(solicitud.id), "estado": solicitud.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="marcar-recibida-taller")
@@ -309,6 +365,18 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
                 ]
             )
 
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._usuarios_solicitud(solicitud),
+            titulo="Repuestos recibidos en taller",
+            mensaje="El taller confirmó la recepción de los repuestos solicitados.",
+            tipo="solicitud_repuesto_recibida_taller",
+            entidad_tipo="SolicitudRepuesto",
+            entidad_id=solicitud.id,
+            data={"solicitud_id": str(solicitud.id), "estado": solicitud.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
+
         return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="asignar-proveedor-eta")
@@ -326,6 +394,17 @@ class SolicitudRepuestoViewSet(viewsets.ModelViewSet):
             f"PROVEEDOR:{proveedor_id};ETA:{eta or ''};OBS:{observaciones or ''}"
         )
         solicitud.save(update_fields=["estado", "observaciones_almacen", "updated_at"])
+        notificar_usuarios_on_commit(
+            empresa=request.tenant,
+            usuarios=self._usuarios_solicitud(solicitud),
+            titulo="Proveedor asignado a solicitud",
+            mensaje=f"Se asignó proveedor a la solicitud y se registró ETA {eta or 'sin fecha estimada'}.",
+            tipo="solicitud_repuesto_proveedor_asignado",
+            entidad_tipo="SolicitudRepuesto",
+            entidad_id=solicitud.id,
+            data={"solicitud_id": str(solicitud.id), "estado": solicitud.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(SolicitudRepuestoSerializer(solicitud).data, status=status.HTTP_200_OK)
 
 

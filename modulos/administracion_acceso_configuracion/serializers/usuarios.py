@@ -201,3 +201,18 @@ class UsuarioPreferenciasNotificacionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Usuario
         fields = ["noti_email", "noti_push"]
+
+
+class RegistrarTokenPushSerializer(serializers.Serializer):
+    token = serializers.CharField(max_length=255)
+    plataforma = serializers.ChoiceField(
+        choices=[("WEB", "WEB"), ("ANDROID", "ANDROID"), ("IOS", "IOS")],
+        default="WEB",
+        required=False,
+    )
+    device_label = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    user_agent = serializers.CharField(max_length=500, required=False, allow_blank=True)
+
+
+class DesactivarTokenPushSerializer(serializers.Serializer):
+    token = serializers.CharField(max_length=255)

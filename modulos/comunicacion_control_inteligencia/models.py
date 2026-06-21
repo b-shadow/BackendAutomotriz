@@ -33,6 +33,7 @@ class CanalEntregaNotificacion(models.TextChoices):
     """Canales de entrega de notificaciones."""
     WEB = "WEB", _("Web")
     EMAIL = "EMAIL", _("Email")
+    PUSH = "PUSH", _("Push")
 
 
 class EstadoEntregaNotificacion(models.TextChoices):
@@ -268,6 +269,54 @@ class NotificacionEntrega(models.Model):
 
     def __str__(self):
         return f"{self.notificacion.titulo} - {self.canal} ({self.estado})"
+
+
+class DispositivoPush(models.Model):
+    """Token FCM asociado a un usuario/dispositivo del tenant."""
+
+    PLATAFORMA_CHOICES = [
+        ("WEB", _("Web")),
+        ("ANDROID", _("Android")),
+        ("IOS", _("iOS")),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    empresa = models.ForeignKey(
+        Empresa,
+        on_delete=models.CASCADE,
+        related_name="dispositivos_push",
+        verbose_name=_("empresa"),
+    )
+    usuario = models.ForeignKey(
+        Usuario,
+        on_delete=models.CASCADE,
+        related_name="dispositivos_push",
+        verbose_name=_("usuario"),
+    )
+    token = models.CharField(_("token FCM"), max_length=255, unique=True, db_index=True)
+    plataforma = models.CharField(
+        _("plataforma"),
+        max_length=20,
+        choices=PLATAFORMA_CHOICES,
+        default="WEB",
+    )
+    device_label = models.CharField(_("nombre dispositivo"), max_length=120, null=True, blank=True)
+    user_agent = models.CharField(_("user agent"), max_length=500, null=True, blank=True)
+    activo = models.BooleanField(_("activo"), default=True, db_index=True)
+    ultimo_registro_at = models.DateTimeField(_("ultimo registro"), auto_now=True)
+    created_at = models.DateTimeField(_("creado en"), auto_now_add=True)
+    updated_at = models.DateTimeField(_("actualizado en"), auto_now=True)
+
+    class Meta:
+        db_table = "dispositivos_push"
+        verbose_name = _("Dispositivo Push")
+        verbose_name_plural = _("Dispositivos Push")
+        indexes = [
+            models.Index(fields=["empresa", "usuario", "activo"]),
+        ]
+
+    def __str__(self):
+        return f"{self.usuario.email} - {self.plataforma} - {'activo' if self.activo else 'inactivo'}"
 
 
 # ============================================================================

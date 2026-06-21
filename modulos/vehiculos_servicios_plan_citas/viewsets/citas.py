@@ -53,6 +53,10 @@ from modulos.administracion_acceso_configuracion.services.auditoria_service impo
     construir_cambios,
     AccionAuditoria,
 )
+from modulos.comunicacion_control_inteligencia.services import (
+    notificar_usuarios_on_commit,
+    obtener_usuarios_roles,
+)
 
 
 # ============================================================================
@@ -471,6 +475,34 @@ class CitasViewSet(viewsets.ModelViewSet):
                 },
             )
 
+            usuarios_operativos = list(
+                obtener_usuarios_roles(self.request.tenant, ["ADMIN", "ASESOR DE SERVICIO"])
+            )
+            if estado_inicial == EstadoCita.PENDIENTE_APROBACION:
+                notificar_usuarios_on_commit(
+                    empresa=self.request.tenant,
+                    usuarios=usuarios_operativos,
+                    titulo="Nueva cita pendiente de aprobación",
+                    mensaje=f"{cliente.nombres if cliente else 'Un cliente'} solicitó una cita para el vehículo {vehiculo.placa}.",
+                    tipo="cita_pendiente_aprobacion",
+                    entidad_tipo="Cita",
+                    entidad_id=cita.id,
+                    data={"cita_id": str(cita.id), "estado": estado_inicial},
+                    excluir_usuario_ids=[request.user.id],
+                )
+            else:
+                notificar_usuarios_on_commit(
+                    empresa=self.request.tenant,
+                    usuarios=[cliente, cita.asesor_responsable],
+                    titulo="Cita programada",
+                    mensaje=f"Tu cita para el vehículo {vehiculo.placa} fue programada para {fecha_hora_inicio_programada:%d/%m/%Y %H:%M}.",
+                    tipo="cita_programada",
+                    entidad_tipo="Cita",
+                    entidad_id=cita.id,
+                    data={"cita_id": str(cita.id), "estado": estado_inicial},
+                    excluir_usuario_ids=[request.user.id],
+                )
+
         # Retornar cita creada (usar CitaDetalleSerializer para respuesta completa)
         detail_serializer = CitaDetalleSerializer(
             cita, 
@@ -597,6 +629,17 @@ class CitasViewSet(viewsets.ModelViewSet):
                 descripcion=f"Cita actualizada",
                 metadata=cambios_dict,
             )
+            notificar_usuarios_on_commit(
+                empresa=self.request.tenant,
+                usuarios=[instance.cliente, instance.asesor_responsable],
+                titulo="Cita actualizada",
+                mensaje=f"La cita del vehículo {instance.vehiculo.placa if instance.vehiculo else 'sin placa'} fue actualizada.",
+                tipo="cita_actualizada",
+                entidad_tipo="Cita",
+                entidad_id=instance.id,
+                data={"cita_id": str(instance.id), "estado": instance.estado},
+                excluir_usuario_ids=[request.user.id],
+            )
 
         # Responder con CitaDetalleSerializer (full detail, no solo edit fields)
         detail_serializer = CitaDetalleSerializer(
@@ -666,6 +709,17 @@ class CitasViewSet(viewsets.ModelViewSet):
                 entidad_id=str(cita.id),
                 descripcion=f"Cita cancelada: {motivo}",
                 metadata={"motivo": motivo},
+            )
+            notificar_usuarios_on_commit(
+                empresa=self.request.tenant,
+                usuarios=[cita.cliente, cita.asesor_responsable],
+                titulo="Cita cancelada",
+                mensaje=f"La cita del vehículo {cita.vehiculo.placa if cita.vehiculo else 'sin placa'} fue cancelada. {motivo or 'Sin motivo adicional.'}",
+                tipo="cita_cancelada",
+                entidad_tipo="Cita",
+                entidad_id=cita.id,
+                data={"cita_id": str(cita.id), "estado": cita.estado},
+                excluir_usuario_ids=[request.user.id],
             )
 
         return Response(
@@ -808,6 +862,17 @@ class CitasViewSet(viewsets.ModelViewSet):
                     },
                 },
             )
+            notificar_usuarios_on_commit(
+                empresa=self.request.tenant,
+                usuarios=[nueva_cita.cliente, nueva_cita.asesor_responsable],
+                titulo="Cita reprogramada",
+                mensaje=f"La cita del vehículo {nueva_cita.vehiculo.placa if nueva_cita.vehiculo else 'sin placa'} fue reprogramada para {fecha_inicio:%d/%m/%Y %H:%M}.",
+                tipo="cita_reprogramada",
+                entidad_tipo="Cita",
+                entidad_id=nueva_cita.id,
+                data={"cita_id": str(nueva_cita.id), "estado": nueva_cita.estado},
+                excluir_usuario_ids=[request.user.id],
+            )
 
         serializer_respuesta = self.get_serializer(nueva_cita)
         return Response(serializer_respuesta.data, status=status.HTTP_201_CREATED)
@@ -889,6 +954,17 @@ class CitasViewSet(viewsets.ModelViewSet):
                     "no_show_marcado_at": ahora.isoformat(),
                     "observacion": observacion,
                 },
+            )
+            notificar_usuarios_on_commit(
+                empresa=self.request.tenant,
+                usuarios=[cita.cliente, cita.asesor_responsable],
+                titulo="Cita marcada como no-show",
+                mensaje=f"La cita del vehículo {cita.vehiculo.placa if cita.vehiculo else 'sin placa'} fue marcada como no-show.",
+                tipo="cita_no_show",
+                entidad_tipo="Cita",
+                entidad_id=cita.id,
+                data={"cita_id": str(cita.id), "estado": cita.estado},
+                excluir_usuario_ids=[request.user.id],
             )
 
         return Response(
@@ -1584,6 +1660,17 @@ class CitasViewSet(viewsets.ModelViewSet):
             cita_actualizada,
             context={"request": request}
         )
+        notificar_usuarios_on_commit(
+            empresa=self.request.tenant,
+            usuarios=[cita_actualizada.cliente, cita_actualizada.asesor_responsable],
+            titulo="Llegada registrada",
+            mensaje=f"Se registró la llegada del vehículo {cita_actualizada.vehiculo.placa if cita_actualizada.vehiculo else 'sin placa'}.",
+            tipo="cita_llegada_registrada",
+            entidad_tipo="Cita",
+            entidad_id=cita_actualizada.id,
+            data={"cita_id": str(cita_actualizada.id), "estado": cita_actualizada.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(
@@ -1667,6 +1754,17 @@ class CitasViewSet(viewsets.ModelViewSet):
             cita_actualizada,
             context={"request": request}
         )
+        notificar_usuarios_on_commit(
+            empresa=self.request.tenant,
+            usuarios=[cita_actualizada.cliente, cita_actualizada.asesor_responsable],
+            titulo="Servicios ajustados en recepción",
+            mensaje=f"Se ajustaron los servicios de la cita del vehículo {cita_actualizada.vehiculo.placa if cita_actualizada.vehiculo else 'sin placa'}.",
+            tipo="cita_servicios_ajustados_recepcion",
+            entidad_tipo="Cita",
+            entidad_id=cita_actualizada.id,
+            data={"cita_id": str(cita_actualizada.id), "estado": cita_actualizada.estado},
+            excluir_usuario_ids=[request.user.id],
+        )
         return Response(serializer_respuesta.data, status=status.HTTP_200_OK)
 
     @action(
@@ -1732,6 +1830,17 @@ class CitasViewSet(viewsets.ModelViewSet):
         serializer = CitaRecepcionOperativaDetalleSerializer(
             cita_actualizada,
             context={"request": request}
+        )
+        notificar_usuarios_on_commit(
+            empresa=self.request.tenant,
+            usuarios=[cita_actualizada.cliente, cita_actualizada.asesor_responsable],
+            titulo="Cita en proceso",
+            mensaje=f"La cita del vehículo {cita_actualizada.vehiculo.placa if cita_actualizada.vehiculo else 'sin placa'} pasó a EN_PROCESO.",
+            tipo="cita_en_proceso",
+            entidad_tipo="Cita",
+            entidad_id=cita_actualizada.id,
+            data={"cita_id": str(cita_actualizada.id), "estado": cita_actualizada.estado},
+            excluir_usuario_ids=[request.user.id],
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -1800,6 +1909,17 @@ class CitasViewSet(viewsets.ModelViewSet):
         serializer = CitaRecepcionOperativaDetalleSerializer(
             cita_actualizada,
             context={"request": request}
+        )
+        notificar_usuarios_on_commit(
+            empresa=self.request.tenant,
+            usuarios=[cita_actualizada.cliente, cita_actualizada.asesor_responsable],
+            titulo="Vehículo devuelto",
+            mensaje=f"Se marcó como devuelto el vehículo {cita_actualizada.vehiculo.placa if cita_actualizada.vehiculo else 'sin placa'}.",
+            tipo="cita_vehiculo_devuelto",
+            entidad_tipo="Cita",
+            entidad_id=cita_actualizada.id,
+            data={"cita_id": str(cita_actualizada.id), "estado": cita_actualizada.estado},
+            excluir_usuario_ids=[request.user.id],
         )
         return Response(serializer.data, status=status.HTTP_200_OK)
 

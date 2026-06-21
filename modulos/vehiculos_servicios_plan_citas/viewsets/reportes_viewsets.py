@@ -4,18 +4,35 @@ from datetime import datetime, timedelta
 from django.db import models
 from django.db.models import Count, Sum
 from django.db.models.functions import TruncDate, TruncMonth
+from django.utils import timezone
 from rest_framework import response, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 
-from modulos.atencion_tecnica_ejecucion.models import EstadoPresupuestoCita, PresupuestoCita
+from modulos.atencion_tecnica_ejecucion.models import (
+    AvanceVehiculo,
+    EstadoOrdenTrabajoDetalle,
+    EstadoOrdenTrabajoGlobal,
+    EstadoPresupuestoCita,
+    OrdenTrabajoDetalle,
+    OrdenTrabajoGlobal,
+    PresupuestoCita,
+    RecepcionVehiculo,
+)
 from modulos.administracion_acceso_configuracion.models import Usuario
 from modulos.inventario_proveedores_administracion.models import (
+    CompraDetalle,
+    EstadoCompra,
     EstadoPagoTaller,
     EstadoSolicitudRepuesto,
+    EstadoSolicitudRepuestoDetalle,
+    EstadoVentaMostrador,
+    Factura,
     ItemInventario,
+    MovimientoInventario,
     PagoTaller,
     SolicitudRepuesto,
+    SolicitudRepuestoDetalle,
     VentaMostrador,
     Compra,
     Proveedor
@@ -25,6 +42,7 @@ from modulos.vehiculos_servicios_plan_citas.models import (
     CitaDetalle,
     EstadoCita,
     EstadoPlanServicioDetalle,
+    PlanServicioDetalle,
     ServicioCatalogo,
     Vehiculo,
 )
@@ -474,44 +492,1377 @@ class ReportesViewSet(viewsets.ViewSet):
 
         return response.Response({"top_servicios": datos})
 
+    def _rol_dashboard(self, user):
+        rol = user.rol.nombre if user and getattr(user, "rol", None) else "USUARIO"
+        return (rol or "USUARIO").strip().upper()
+
+    def _kpi(self, key, label, value, format_type="number", tone="neutral"):
+        return {
+            "key": key,
+            "label": label,
+            "value": value,
+            "format": format_type,
+            "tone": tone,
+        }
+
+    def _section(self, section_id, title, description, kpis=None, charts=None, tables=None):
+        return {
+            "id": section_id,
+            "title": title,
+            "description": description,
+            "kpis": kpis or [],
+            "charts": charts or [],
+            "tables": tables or [],
+        }
+
+    def _chart(self, chart_id, chart_type, title, data, x_key=None, y_key=None, series=None):
+        payload = {
+            "id": chart_id,
+            "type": chart_type,
+            "title": title,
+            "data": data or [],
+        }
+        if x_key:
+            payload["xKey"] = x_key
+        if y_key:
+            payload["yKey"] = y_key
+        if series:
+            payload["series"] = series
+        return payload
+
+    def _table(self, table_id, title, columns, rows):
+        return {
+            "id": table_id,
+            "title": title,
+            "columns": columns,
+            "rows": rows or [],
+        }
+
+    def _serie_ultimos_dias(self, queryset, date_field, *, days=7, sum_field=None):
+        inicio = timezone.localdate() - timedelta(days=days - 1)
+        filtros = {f"{date_field}__date__gte": inicio}
+        base = queryset.filter(**filtros).annotate(fecha=TruncDate(date_field)).values("fecha")
+        if sum_field:
+            filas = base.annotate(total=Sum(sum_field)).order_by("fecha")
+        else:
+            filas = base.annotate(total=Count("id")).order_by("fecha")
+
+        valores = {
+            fila["fecha"]: float(fila["total"] or 0) if sum_field else fila["total"]
+            for fila in filas
+            if fila["fecha"]
+        }
+        salida = []
+        for offset in range(days):
+            fecha = inicio + timedelta(days=offset)
+            salida.append(
+                {
+                    "fecha": fecha.strftime("%Y-%m-%d"),
+                    "total": valores.get(fecha, 0),
+                }
+            )
+        return salida
+
+    def _serie_ultimos_meses(self, datasets, *, months=6):
+        hoy = timezone.localdate()
+        periodo = []
+        year = hoy.year
+        month = hoy.month
+
+        for _ in range(months):
+            periodo.append((year, month))
+            month -= 1
+            if month == 0:
+                month = 12
+                year -= 1
+
+        periodo.reverse()
+        salida = []
+
+        agregados = {}
+        for key, spec in datasets.items():
+            queryset = spec["queryset"]
+            date_field = spec["date_field"]
+            sum_field = spec.get("sum_field")
+
+            inicio_year, inicio_month = periodo[0]
+            filtros = {
+                f"{date_field}__year__gte": inicio_year,
+            }
+            base = queryset.filter(**filtros).annotate(mes=TruncMonth(date_field)).values("mes")
+            if sum_field:
+                filas = base.annotate(total=Sum(sum_field)).order_by("mes")
+                agregados[key] = {
+                    (fila["mes"].year, fila["mes"].month): float(fila["total"] or 0)
+                    for fila in filas
+                    if fila["mes"] and (fila["mes"].year, fila["mes"].month) in periodo
+                }
+            else:
+                filas = base.annotate(total=Count("id")).order_by("mes")
+                agregados[key] = {
+                    (fila["mes"].year, fila["mes"].month): fila["total"]
+                    for fila in filas
+                    if fila["mes"] and (fila["mes"].year, fila["mes"].month) in periodo
+                }
+
+        for year, month in periodo:
+            fila = {
+                "mes": f"{year}-{month:02d}",
+            }
+            for key in datasets.keys():
+                fila[key] = agregados.get(key, {}).get((year, month), 0)
+            salida.append(fila)
+
+        return salida
+
+    def _flatten_kpis(self, sections):
+        flat = {}
+        for section in sections:
+            for kpi in section.get("kpis", []):
+                flat[kpi["key"]] = kpi["value"]
+        return flat
+
+    def _dashboard_usuario(self, request, empresa, hoy):
+        citas_usuario = Cita.objects.filter(empresa=empresa, cliente=request.user)
+        vehiculos_usuario = Vehiculo.objects.filter(empresa=empresa, propietario=request.user)
+        presupuestos_usuario = PresupuestoCita.objects.filter(empresa=empresa, cita__cliente=request.user)
+        plan_detalles_usuario = PlanServicioDetalle.objects.filter(
+            empresa=empresa,
+            plan_servicio__vehiculo__propietario=request.user,
+        )
+        pagos_usuario = PagoTaller.objects.filter(
+            empresa=empresa,
+            cita__cliente=request.user,
+        ).exclude(estado=EstadoPagoTaller.ANULADO)
+        solicitudes_usuario = SolicitudRepuesto.objects.filter(
+            empresa=empresa,
+            cita__cliente=request.user,
+        )
+        solicitud_detalles_usuario = SolicitudRepuestoDetalle.objects.filter(
+            empresa=empresa,
+            solicitud__cita__cliente=request.user,
+        )
+        serie_usuario_actividad = self._serie_ultimos_meses(
+            {
+                "citas": {
+                    "queryset": citas_usuario,
+                    "date_field": "fecha_hora_inicio_programada",
+                },
+                "presupuestos": {
+                    "queryset": presupuestos_usuario,
+                    "date_field": "created_at",
+                },
+            },
+            months=6,
+        )
+
+        proximas_citas = citas_usuario.filter(
+            fecha_hora_inicio_programada__date__gte=hoy,
+            estado__in=[
+                EstadoCita.PENDIENTE_APROBACION,
+                EstadoCita.PROGRAMADA,
+                EstadoCita.EN_ESPERA_INGRESO,
+                EstadoCita.EN_PROCESO,
+            ],
+        )
+        vehiculos_taller = citas_usuario.filter(
+            estado__in=[EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO],
+            vehiculo__isnull=False,
+        ).values("vehiculo_id").distinct().count()
+        presupuestos_pendientes = presupuestos_usuario.filter(
+            estado__in=[EstadoPresupuestoCita.COMUNICADO, EstadoPresupuestoCita.AJUSTADO]
+        ).count()
+        pagos_pendientes = pagos_usuario.filter(
+            estado__in=[
+                EstadoPagoTaller.PENDIENTE,
+                EstadoPagoTaller.PROCESANDO,
+                EstadoPagoTaller.REGISTRADO,
+            ]
+        ).count()
+        avances_visibles = AvanceVehiculo.objects.filter(
+            empresa=empresa,
+            cita__cliente=request.user,
+            visible_cliente=True,
+        )
+
+        agenda_rows = [
+            {
+                "fecha": cita.fecha_hora_inicio_programada.strftime("%Y-%m-%d %H:%M"),
+                "vehiculo": f"{cita.vehiculo.marca} {cita.vehiculo.modelo}" if cita.vehiculo else "Sin vehículo",
+                "placa": cita.vehiculo.placa if cita.vehiculo else "-",
+                "estado": cita.estado,
+            }
+            for cita in proximas_citas.select_related("vehiculo").order_by("fecha_hora_inicio_programada")[:5]
+        ]
+        taller_rows = [
+            {
+                "placa": cita.vehiculo.placa if cita.vehiculo else "-",
+                "vehiculo": f"{cita.vehiculo.marca} {cita.vehiculo.modelo}" if cita.vehiculo else "Sin vehículo",
+                "estado": cita.estado,
+                "avance": (
+                    avances_visibles.filter(cita=cita).order_by("-created_at").values_list("estado_nuevo", flat=True).first()
+                    or "Sin actualización"
+                ),
+            }
+            for cita in citas_usuario.filter(
+                estado__in=[EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO]
+            ).select_related("vehiculo").order_by("-updated_at")[:5]
+        ]
+
+        return [
+            self._section(
+                "usuario_resumen",
+                "Mi actividad",
+                "Resumen personal de vehículos, citas y pagos.",
+                kpis=[
+                    self._kpi("mis_vehiculos", "Mis vehículos", vehiculos_usuario.count()),
+                    self._kpi("mis_citas_proximas", "Citas próximas", proximas_citas.count()),
+                    self._kpi("mis_vehiculos_en_taller", "Vehículos en taller", vehiculos_taller, tone="warning"),
+                    self._kpi(
+                        "mis_servicios_plan_activos",
+                        "Servicios de plan activos",
+                        plan_detalles_usuario.filter(
+                            estado__in=[
+                                EstadoPlanServicioDetalle.PENDIENTE,
+                                EstadoPlanServicioDetalle.PROGRAMADO,
+                                EstadoPlanServicioDetalle.EN_PROCESO,
+                                EstadoPlanServicioDetalle.RECOMENDADO,
+                            ]
+                        ).count(),
+                    ),
+                    self._kpi("mis_presupuestos_pendientes", "Presupuestos por responder", presupuestos_pendientes, tone="warning"),
+                    self._kpi("mis_pagos_pendientes", "Pagos pendientes", pagos_pendientes, tone="danger"),
+                    self._kpi(
+                        "mis_solicitudes_repuesto_activas",
+                        "Solicitudes de repuesto activas",
+                        solicitudes_usuario.exclude(
+                            estado__in=[
+                                EstadoSolicitudRepuesto.ENTREGADA,
+                                EstadoSolicitudRepuesto.CERRADA,
+                                EstadoSolicitudRepuesto.RECHAZADA_POR_ASESOR,
+                            ]
+                        ).count(),
+                        tone="warning",
+                    ),
+                    self._kpi(
+                        "mis_items_repuesto_pendientes",
+                        "Items de repuesto pendientes",
+                        solicitud_detalles_usuario.exclude(
+                            estado__in=[
+                                EstadoSolicitudRepuestoDetalle.ENTREGADO,
+                                EstadoSolicitudRepuestoDetalle.CANCELADO,
+                            ]
+                        ).count(),
+                        tone="warning",
+                    ),
+                ],
+                charts=[
+                    self._chart(
+                        "mis_citas_estado",
+                        "pie",
+                        "Estado de mis citas",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in citas_usuario.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "mis_actividad_6m",
+                        "line",
+                        "Mis citas y presupuestos por mes",
+                        serie_usuario_actividad,
+                        x_key="mes",
+                        series=[
+                            {"key": "citas", "label": "Citas"},
+                            {"key": "presupuestos", "label": "Presupuestos"},
+                        ],
+                    ),
+                    self._chart(
+                        "mis_planes_estado",
+                        "bar",
+                        "Estado de servicios de mi plan",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in plan_detalles_usuario.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "mis_repuestos_estado",
+                        "bar",
+                        "Estado de mis items de repuesto",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in solicitud_detalles_usuario.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "mis_pagos_estado",
+                        "pie",
+                        "Estado de mis pagos",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in pagos_usuario.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "mis_proximas_citas",
+                        "Próximas citas",
+                        ["Fecha", "Vehículo", "Placa", "Estado"],
+                        agenda_rows,
+                    ),
+                    self._table(
+                        "mis_vehiculos_taller",
+                        "Vehículos actualmente en taller",
+                        ["Placa", "Vehículo", "Estado", "Último avance"],
+                        taller_rows,
+                    ),
+                ],
+            )
+        ]
+
+    def _dashboard_asesor(self, empresa, hoy):
+        citas = Cita.objects.filter(empresa=empresa)
+        presupuestos = PresupuestoCita.objects.filter(empresa=empresa)
+        ordenes = OrdenTrabajoGlobal.objects.filter(empresa=empresa)
+        ordenes_detalle = OrdenTrabajoDetalle.objects.filter(empresa=empresa)
+        planes_detalle = PlanServicioDetalle.objects.filter(empresa=empresa)
+        recepciones = RecepcionVehiculo.objects.filter(empresa=empresa)
+        solicitudes = SolicitudRepuesto.objects.filter(empresa=empresa)
+        solicitud_detalles = SolicitudRepuestoDetalle.objects.filter(empresa=empresa)
+        serie_asesor_operacion = self._serie_ultimos_meses(
+            {
+                "citas": {
+                    "queryset": citas,
+                    "date_field": "fecha_hora_inicio_programada",
+                },
+                "recepciones": {
+                    "queryset": recepciones,
+                    "date_field": "fecha_recepcion",
+                },
+            },
+            months=6,
+        )
+
+        citas_activas = citas.filter(
+            estado__in=[EstadoCita.PROGRAMADA, EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO]
+        )
+        vehiculos_en_taller_rows = [
+            {
+                "placa": cita.vehiculo.placa if cita.vehiculo else "-",
+                "vehiculo": f"{cita.vehiculo.marca} {cita.vehiculo.modelo}" if cita.vehiculo else "Sin vehículo",
+                "cliente": cita.cliente.get_full_name() if cita.cliente else "-",
+                "estado": cita.estado,
+            }
+            for cita in citas.filter(
+                estado__in=[EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO]
+            ).select_related("vehiculo", "cliente").order_by("fecha_hora_inicio_programada")[:8]
+        ]
+
+        return [
+            self._section(
+                "asesor_operacion",
+                "Operación del taller",
+                "Citas, recepciones, presupuestos y órdenes activas.",
+                kpis=[
+                    self._kpi("citas_hoy", "Citas de hoy", citas.filter(fecha_hora_inicio_programada__date=hoy).count()),
+                    self._kpi("citas_pendientes_aprobacion", "Pendientes de aprobación", citas.filter(estado=EstadoCita.PENDIENTE_APROBACION).count(), tone="warning"),
+                    self._kpi("vehiculos_en_taller", "Vehículos en taller", citas.filter(estado__in=[EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO], vehiculo__isnull=False).values("vehiculo_id").distinct().count()),
+                    self._kpi("recepciones_hoy", "Recepciones de hoy", recepciones.filter(fecha_recepcion__date=hoy).count()),
+                    self._kpi("recepciones_pendientes_entrega", "Recepciones sin entrega", recepciones.filter(fecha_recogida__isnull=True).count(), tone="warning"),
+                    self._kpi(
+                        "servicios_plan_urgentes",
+                        "Servicios urgentes del plan",
+                        planes_detalle.filter(
+                            estado__in=[
+                                EstadoPlanServicioDetalle.PENDIENTE,
+                                EstadoPlanServicioDetalle.PROGRAMADO,
+                                EstadoPlanServicioDetalle.EN_PROCESO,
+                                EstadoPlanServicioDetalle.RECOMENDADO,
+                            ],
+                            prioridad__in=["ALTA", "URGENTE"],
+                        ).count(),
+                        tone="danger",
+                    ),
+                    self._kpi(
+                        "solicitudes_esperando_asesor",
+                        "Solicitudes esperando asesor",
+                        solicitudes.filter(estado=EstadoSolicitudRepuesto.CREADA).count(),
+                        tone="warning",
+                    ),
+                    self._kpi(
+                        "repuestos_en_almacen",
+                        "Solicitudes en almacen",
+                        solicitudes.filter(
+                            estado__in=[
+                                EstadoSolicitudRepuesto.APROBADA_POR_ASESOR,
+                                EstadoSolicitudRepuesto.EN_REVISION_ALMACEN,
+                                EstadoSolicitudRepuesto.PARCIALMENTE_DISPONIBLE,
+                            ]
+                        ).count(),
+                        tone="warning",
+                    ),
+                    self._kpi("presupuestos_por_responder", "Presupuestos por responder", presupuestos.filter(estado__in=[EstadoPresupuestoCita.COMUNICADO, EstadoPresupuestoCita.AJUSTADO]).count(), tone="warning"),
+                    self._kpi("ordenes_abiertas", "Órdenes abiertas", ordenes.filter(estado__in=[EstadoOrdenTrabajoGlobal.ABIERTA, EstadoOrdenTrabajoGlobal.ASIGNADA, EstadoOrdenTrabajoGlobal.EN_PROCESO, EstadoOrdenTrabajoGlobal.PAUSADA]).count()),
+                ],
+                charts=[
+                    self._chart(
+                        "citas_semana_asesor",
+                        "line",
+                        "Citas programadas en los últimos 7 días",
+                        self._serie_ultimos_dias(citas, "fecha_hora_inicio_programada"),
+                        x_key="fecha",
+                        y_key="total",
+                    ),
+                    self._chart(
+                        "presupuestos_estado_asesor",
+                        "pie",
+                        "Estado de presupuestos",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in presupuestos.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "solicitudes_estado_asesor",
+                        "pie",
+                        "Estado de solicitudes de repuesto",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in solicitudes.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "citas_vs_recepciones_asesor",
+                        "line",
+                        "Citas vs recepciones por mes",
+                        serie_asesor_operacion,
+                        x_key="mes",
+                        series=[
+                            {"key": "citas", "label": "Citas"},
+                            {"key": "recepciones", "label": "Recepciones"},
+                        ],
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "vehiculos_taller_asesor",
+                        "Vehículos actualmente en taller",
+                        ["Placa", "Vehículo", "Cliente", "Estado"],
+                        vehiculos_en_taller_rows,
+                    ),
+                ],
+            ),
+            self._section(
+                "asesor_demanda",
+                "Demanda de servicio",
+                "Servicios y vehículos con mayor actividad.",
+                charts=[
+                    self._chart(
+                        "top_vehiculos_asesor",
+                        "bar",
+                        "Vehículos con más citas",
+                        [
+                            {
+                                "name": fila["vehiculo__placa"] or "Sin placa",
+                                "value": fila["total"],
+                            }
+                            for fila in citas.filter(vehiculo__isnull=False)
+                            .values("vehiculo__placa")
+                            .annotate(total=Count("id"))
+                            .order_by("-total")[:6]
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "estado_ordenes_detalle_asesor",
+                        "bar",
+                        "Estado de servicios en ordenes de trabajo",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in ordenes_detalle.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "prioridad_planes_asesor",
+                        "bar",
+                        "Prioridad de servicios del plan",
+                        [
+                            {"name": fila["prioridad"], "value": fila["total"]}
+                            for fila in planes_detalle.values("prioridad").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "top_servicios_asesor",
+                        "bar",
+                        "Servicios mas demandados",
+                        [
+                            {
+                                "name": fila["servicio_catalogo__nombre"] or "Servicio",
+                                "value": fila["total"],
+                            }
+                            for fila in planes_detalle.values("servicio_catalogo__nombre")
+                            .annotate(total=Count("id"))
+                            .order_by("-total")[:6]
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "solicitudes_detalle_asesor",
+                        "bar",
+                        "Estado de items solicitados",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in solicitud_detalles.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "proximas_citas_asesor",
+                        "Próximas citas",
+                        ["Fecha", "Placa", "Vehículo", "Canal"],
+                        [
+                            {
+                                "fecha": cita.fecha_hora_inicio_programada.strftime("%Y-%m-%d %H:%M"),
+                                "placa": cita.vehiculo.placa if cita.vehiculo else "-",
+                                "vehiculo": f"{cita.vehiculo.marca} {cita.vehiculo.modelo}" if cita.vehiculo else "Sin vehículo",
+                                "canal": cita.canal_origen,
+                            }
+                            for cita in citas_activas.select_related("vehiculo").order_by("fecha_hora_inicio_programada")[:6]
+                        ],
+                    ),
+                ],
+            ),
+        ]
+
+    def _dashboard_mecanico(self, request, empresa, hoy):
+        detalles = OrdenTrabajoDetalle.objects.filter(empresa=empresa, mecanico_asignado=request.user)
+        ordenes = OrdenTrabajoGlobal.objects.filter(empresa=empresa, mecanicos_asignados__mecanico=request.user).distinct()
+        solicitudes = SolicitudRepuesto.objects.filter(empresa=empresa, solicitado_por=request.user)
+        solicitudes_detalle = SolicitudRepuestoDetalle.objects.filter(
+            empresa=empresa,
+            solicitud__solicitado_por=request.user,
+        )
+        planes_detalle = PlanServicioDetalle.objects.filter(
+            empresa=empresa,
+            ordenes_detalles__mecanico_asignado=request.user,
+        ).distinct()
+
+        tareas_activas = detalles.filter(
+            estado__in=[
+                EstadoOrdenTrabajoDetalle.POR_HACER,
+                EstadoOrdenTrabajoDetalle.EN_PROCESO,
+                EstadoOrdenTrabajoDetalle.PAUSADO,
+            ]
+        )
+        serie_mecanico_carga = self._serie_ultimos_meses(
+            {
+                "asignados": {
+                    "queryset": detalles,
+                    "date_field": "created_at",
+                },
+                "finalizados": {
+                    "queryset": detalles.filter(
+                        estado=EstadoOrdenTrabajoDetalle.FINALIZADO,
+                        fin_real__isnull=False,
+                    ),
+                    "date_field": "fin_real",
+                },
+            },
+            months=6,
+        )
+
+        return [
+            self._section(
+                "mecanico_tareas",
+                "Mis tareas técnicas",
+                "Carga de trabajo, avance y repuestos solicitados.",
+                kpis=[
+                    self._kpi("ordenes_asignadas_activas", "Órdenes asignadas", ordenes.filter(estado__in=[EstadoOrdenTrabajoGlobal.ASIGNADA, EstadoOrdenTrabajoGlobal.EN_PROCESO, EstadoOrdenTrabajoGlobal.PAUSADA]).count()),
+                    self._kpi("detalles_pendientes", "Servicios por hacer", detalles.filter(estado=EstadoOrdenTrabajoDetalle.POR_HACER).count()),
+                    self._kpi("detalles_en_proceso", "Servicios en proceso", detalles.filter(estado=EstadoOrdenTrabajoDetalle.EN_PROCESO).count(), tone="warning"),
+                    self._kpi("detalles_finalizados_hoy", "Servicios finalizados hoy", detalles.filter(fin_real__date=hoy, estado=EstadoOrdenTrabajoDetalle.FINALIZADO).count(), tone="success"),
+                    self._kpi(
+                        "servicios_alta_prioridad",
+                        "Servicios de alta prioridad",
+                        detalles.filter(
+                            estado__in=[
+                                EstadoOrdenTrabajoDetalle.POR_HACER,
+                                EstadoOrdenTrabajoDetalle.EN_PROCESO,
+                                EstadoOrdenTrabajoDetalle.PAUSADO,
+                            ],
+                            prioridad__in=["ALTA", "URGENTE"],
+                        ).count(),
+                        tone="danger",
+                    ),
+                    self._kpi(
+                        "horas_estimadas_pendientes",
+                        "Horas estimadas pendientes",
+                        round(float((tareas_activas.aggregate(total=Sum("tiempo_estandar_min")).get("total") or 0)) / 60, 2),
+                    ),
+                    self._kpi("solicitudes_repuesto_abiertas", "Solicitudes de repuesto abiertas", solicitudes.exclude(estado__in=[EstadoSolicitudRepuesto.ENTREGADA, EstadoSolicitudRepuesto.CERRADA, EstadoSolicitudRepuesto.RECHAZADA_POR_ASESOR]).count(), tone="warning"),
+                    self._kpi(
+                        "items_repuesto_pendientes",
+                        "Items de repuesto pendientes",
+                        solicitudes_detalle.exclude(
+                            estado__in=[
+                                EstadoSolicitudRepuestoDetalle.ENTREGADO,
+                                EstadoSolicitudRepuestoDetalle.CANCELADO,
+                            ]
+                        ).count(),
+                        tone="warning",
+                    ),
+                    self._kpi(
+                        "items_repuesto_sin_stock",
+                        "Items solicitados sin stock",
+                        solicitudes_detalle.filter(estado=EstadoSolicitudRepuestoDetalle.SIN_STOCK).count(),
+                        tone="danger",
+                    ),
+                ],
+                charts=[
+                    self._chart(
+                        "mecanico_estado_tareas",
+                        "pie",
+                        "Estado de mis servicios",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in detalles.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "mecanico_estado_repuestos",
+                        "pie",
+                        "Estado de items de repuesto solicitados",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in solicitudes_detalle.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "mecanico_carga_6m",
+                        "line",
+                        "Servicios asignados vs finalizados por mes",
+                        serie_mecanico_carga,
+                        x_key="mes",
+                        series=[
+                            {"key": "asignados", "label": "Asignados"},
+                            {"key": "finalizados", "label": "Finalizados"},
+                        ],
+                    ),
+                    self._chart(
+                        "mecanico_prioridad_tareas",
+                        "bar",
+                        "Prioridad de mis servicios activos",
+                        [
+                            {"name": fila["prioridad"], "value": fila["total"]}
+                            for fila in tareas_activas.values("prioridad").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "mecanico_top_servicios",
+                        "bar",
+                        "Servicios tecnicos mas asignados",
+                        [
+                            {
+                                "name": fila["servicio_catalogo__nombre"] or "Servicio",
+                                "value": fila["total"],
+                            }
+                            for fila in detalles.values("servicio_catalogo__nombre")
+                            .annotate(total=Count("id"))
+                            .order_by("-total")[:6]
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "mecanico_tareas_activas",
+                        "Servicios activos asignados",
+                        ["Vehículo", "Placa", "Servicio", "Prioridad", "Estado"],
+                        [
+                            {
+                                "vehiculo": f"{detalle.orden_global.cita.vehiculo.marca} {detalle.orden_global.cita.vehiculo.modelo}" if detalle.orden_global and detalle.orden_global.cita and detalle.orden_global.cita.vehiculo else "Sin vehículo",
+                                "placa": detalle.orden_global.cita.vehiculo.placa if detalle.orden_global and detalle.orden_global.cita and detalle.orden_global.cita.vehiculo else "-",
+                                "servicio": detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else "Servicio manual",
+                                "prioridad": detalle.prioridad,
+                                "estado": detalle.estado,
+                            }
+                            for detalle in tareas_activas.select_related(
+                                "orden_global__cita__vehiculo",
+                                "servicio_catalogo",
+                            ).order_by("-prioridad", "orden_visual")[:8]
+                        ],
+                    ),
+                    self._table(
+                        "mecanico_plan_detalles",
+                        "Servicios del plan vinculados",
+                        ["Servicio", "Estado", "Prioridad", "Tiempo estandar"],
+                        [
+                            {
+                                "servicio": detalle.servicio_catalogo.nombre if detalle.servicio_catalogo else "Servicio manual",
+                                "estado": detalle.estado,
+                                "prioridad": detalle.prioridad,
+                                "tiempo_estandar": detalle.tiempo_estandar_min,
+                            }
+                            for detalle in planes_detalle.select_related("servicio_catalogo").order_by("-prioridad", "-updated_at")[:8]
+                        ],
+                    ),
+                ],
+            )
+        ]
+
+    def _dashboard_administrativo(self, empresa, hoy):
+        pagos = PagoTaller.objects.filter(empresa=empresa).exclude(estado=EstadoPagoTaller.ANULADO)
+        ventas = VentaMostrador.objects.filter(empresa=empresa)
+        compras = Compra.objects.filter(empresa=empresa)
+        facturas = Factura.objects.filter(empresa=empresa)
+        inicio_mes = hoy.replace(day=1)
+        serie_finanzas_mensual = self._serie_ultimos_meses(
+            {
+                "ingresos": {
+                    "queryset": pagos.filter(estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO]),
+                    "date_field": "recibido_at",
+                    "sum_field": "monto_total",
+                },
+                "compras": {
+                    "queryset": compras.filter(estado=EstadoCompra.CONFIRMADA),
+                    "date_field": "fecha_compra",
+                    "sum_field": "total",
+                },
+            },
+            months=6,
+        )
+        serie_documentos_mensual = self._serie_ultimos_meses(
+            {
+                "ventas": {
+                    "queryset": ventas.filter(estado=EstadoVentaMostrador.CONFIRMADA),
+                    "date_field": "created_at",
+                },
+                "facturas": {
+                    "queryset": facturas,
+                    "date_field": "created_at",
+                },
+            },
+            months=6,
+        )
+
+        return [
+            self._section(
+                "administrativo_finanzas",
+                "Caja y facturación",
+                "Cobros del taller, ventas, facturas y compras.",
+                kpis=[
+                    self._kpi("ingresos_hoy", "Ingresos hoy", float(pagos.filter(recibido_at__date=hoy, estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO]).aggregate(total=Sum("monto_total")).get("total") or 0), format_type="currency", tone="success"),
+                    self._kpi("ingresos_mes", "Ingresos del mes", float(pagos.filter(recibido_at__date__gte=inicio_mes, estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO]).aggregate(total=Sum("monto_total")).get("total") or 0), format_type="currency"),
+                    self._kpi("pagos_pendientes", "Pagos pendientes", pagos.filter(estado__in=[EstadoPagoTaller.PENDIENTE, EstadoPagoTaller.PROCESANDO, EstadoPagoTaller.REGISTRADO]).count(), tone="warning"),
+                    self._kpi("ventas_mostrador_mes", "Ventas mostrador del mes", ventas.filter(created_at__date__gte=inicio_mes, estado=EstadoVentaMostrador.CONFIRMADA).count()),
+                    self._kpi("facturas_emitidas_mes", "Facturas emitidas", facturas.filter(created_at__date__gte=inicio_mes).count()),
+                    self._kpi(
+                        "gasto_compras_mes",
+                        "Gasto en compras del mes",
+                        float(
+                            compras.filter(created_at__date__gte=inicio_mes, estado=EstadoCompra.CONFIRMADA)
+                            .aggregate(total=Sum("total"))
+                            .get("total")
+                            or 0
+                        ),
+                        format_type="currency",
+                    ),
+                ],
+                charts=[
+                    self._chart(
+                        "ingresos_7d_admin",
+                        "line",
+                        "Cobros registrados últimos 7 días",
+                        self._serie_ultimos_dias(
+                            pagos.filter(estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO]),
+                            "recibido_at",
+                            sum_field="monto_total",
+                        ),
+                        x_key="fecha",
+                        y_key="total",
+                    ),
+                    self._chart(
+                        "pagos_estado_admin",
+                        "pie",
+                        "Estado de pagos",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in pagos.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "flujo_finanzas_6m_admin",
+                        "bar",
+                        "Ingresos vs compras por mes",
+                        serie_finanzas_mensual,
+                        x_key="mes",
+                        series=[
+                            {"key": "ingresos", "label": "Ingresos"},
+                            {"key": "compras", "label": "Compras"},
+                        ],
+                    ),
+                    self._chart(
+                        "documentos_6m_admin",
+                        "line",
+                        "Ventas y facturas por mes",
+                        serie_documentos_mensual,
+                        x_key="mes",
+                        series=[
+                            {"key": "ventas", "label": "Ventas"},
+                            {"key": "facturas", "label": "Facturas"},
+                        ],
+                    ),
+                    self._chart(
+                        "pagos_metodo_admin",
+                        "bar",
+                        "Cobros por metodo de pago",
+                        [
+                            {"name": fila["metodo_pago"] or "Sin metodo", "value": fila["total"]}
+                            for fila in pagos.values("metodo_pago").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "ventas_estado_admin",
+                        "pie",
+                        "Estado de ventas de mostrador",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in ventas.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "pagos_recientes_admin",
+                        "Cobros recientes",
+                        ["Origen", "Estado", "Monto", "Método", "Fecha"],
+                        [
+                            {
+                                "origen": "Cita" if pago.cita_id else "Venta",
+                                "estado": pago.estado,
+                                "monto": float(pago.monto_total or 0),
+                                "metodo": pago.metodo_pago,
+                                "fecha": (
+                                    (pago.recibido_at or pago.created_at).strftime("%Y-%m-%d %H:%M")
+                                    if (pago.recibido_at or pago.created_at)
+                                    else "-"
+                                ),
+                            }
+                            for pago in pagos.order_by("-created_at")[:8]
+                        ],
+                    ),
+                ],
+            )
+        ]
+
+    def _dashboard_almacenero(self, empresa, hoy):
+        items = ItemInventario.objects.filter(empresa=empresa, activo=True)
+        solicitudes = SolicitudRepuesto.objects.filter(empresa=empresa)
+        solicitud_detalles = SolicitudRepuestoDetalle.objects.filter(empresa=empresa)
+        compras = Compra.objects.filter(empresa=empresa)
+        movimientos = MovimientoInventario.objects.filter(empresa=empresa)
+        inicio_mes = hoy.replace(day=1)
+        serie_almacen_flujo = self._serie_ultimos_meses(
+            {
+                "compras": {
+                    "queryset": compras.filter(estado=EstadoCompra.CONFIRMADA),
+                    "date_field": "fecha_compra",
+                },
+                "movimientos": {
+                    "queryset": movimientos,
+                    "date_field": "created_at",
+                },
+            },
+            months=6,
+        )
+
+        return [
+            self._section(
+                "almacen_control",
+                "Almacén e inventario",
+                "Stock crítico, solicitudes y compras del almacén.",
+                kpis=[
+                    self._kpi("items_stock_bajo", "Items con stock bajo", items.filter(stock_actual__lte=models.F("stock_minimo")).count(), tone="danger"),
+                    self._kpi("items_sin_stock", "Items sin stock", items.filter(stock_actual__lte=0).count(), tone="danger"),
+                    self._kpi("solicitudes_pendientes_almacen", "Solicitudes pendientes", solicitudes.filter(estado__in=[EstadoSolicitudRepuesto.APROBADA_POR_ASESOR, EstadoSolicitudRepuesto.EN_REVISION_ALMACEN, EstadoSolicitudRepuesto.PARCIALMENTE_DISPONIBLE]).count(), tone="warning"),
+                    self._kpi("compras_confirmadas_mes", "Compras confirmadas del mes", compras.filter(created_at__date__gte=inicio_mes, estado="CONFIRMADA").count()),
+                    self._kpi("movimientos_hoy", "Movimientos hoy", movimientos.filter(created_at__date=hoy).count()),
+                    self._kpi(
+                        "items_solicitud_sin_stock",
+                        "Items solicitados sin stock",
+                        solicitud_detalles.filter(estado=EstadoSolicitudRepuestoDetalle.SIN_STOCK).count(),
+                        tone="danger",
+                    ),
+                    self._kpi(
+                        "unidades_pendientes_entrega",
+                        "Unidades pendientes de entrega",
+                        sum(
+                            max((detalle.cantidad_aprobada or 0) - (detalle.cantidad_entregada or 0), 0)
+                            for detalle in solicitud_detalles
+                        ),
+                        tone="warning",
+                    ),
+                    self._kpi("compras_borrador", "Compras en borrador", compras.filter(estado=EstadoCompra.BORRADOR).count()),
+                ],
+                charts=[
+                    self._chart(
+                        "solicitudes_estado_almacen",
+                        "pie",
+                        "Estado de solicitudes de repuesto",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in solicitudes.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "solicitudes_detalle_estado_almacen",
+                        "bar",
+                        "Estado de items solicitados",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in solicitud_detalles.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "top_items_movimiento_almacen",
+                        "bar",
+                        "Items con mayor movimiento",
+                        [
+                            {
+                                "name": fila["item_inventario__nombre"] or "Item",
+                                "value": fila["total"],
+                            }
+                            for fila in movimientos.values("item_inventario__nombre").annotate(total=Count("id")).order_by("-total")[:6]
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "flujo_almacen_6m",
+                        "line",
+                        "Compras confirmadas vs movimientos por mes",
+                        serie_almacen_flujo,
+                        x_key="mes",
+                        series=[
+                            {"key": "compras", "label": "Compras"},
+                            {"key": "movimientos", "label": "Movimientos"},
+                        ],
+                    ),
+                    self._chart(
+                        "items_tipo_almacen",
+                        "pie",
+                        "Distribucion de inventario por tipo",
+                        [
+                            {"name": fila["tipo_item"], "value": fila["total"]}
+                            for fila in items.values("tipo_item").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "compras_estado_almacen",
+                        "pie",
+                        "Estado de compras",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in compras.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "items_criticos_almacen",
+                        "Stock crítico",
+                        ["Código", "Item", "Stock actual", "Stock mínimo"],
+                        [
+                            {
+                                "codigo": item.codigo,
+                                "item": item.nombre,
+                                "stock_actual": item.stock_actual,
+                                "stock_minimo": item.stock_minimo,
+                            }
+                            for item in items.filter(stock_actual__lte=models.F("stock_minimo")).order_by("stock_actual", "nombre")[:8]
+                        ],
+                    ),
+                    self._table(
+                        "solicitudes_pendientes_almacen_tabla",
+                        "Solicitudes pendientes de atención",
+                        ["Cita", "Estado", "Solicitado por", "Fecha"],
+                        [
+                            {
+                                "cita": str(solicitud.cita_id),
+                                "estado": solicitud.estado,
+                                "solicitado_por": solicitud.solicitado_por.get_full_name() if solicitud.solicitado_por else "-",
+                                "fecha": solicitud.created_at.strftime("%Y-%m-%d %H:%M"),
+                            }
+                            for solicitud in solicitudes.filter(
+                                estado__in=[
+                                    EstadoSolicitudRepuesto.APROBADA_POR_ASESOR,
+                                    EstadoSolicitudRepuesto.EN_REVISION_ALMACEN,
+                                    EstadoSolicitudRepuesto.PARCIALMENTE_DISPONIBLE,
+                                ]
+                            ).select_related("solicitado_por").order_by("-created_at")[:8]
+                        ],
+                    ),
+                ],
+            )
+        ]
+
+    def _dashboard_admin(self, empresa, hoy):
+        citas = Cita.objects.filter(empresa=empresa)
+        pagos = PagoTaller.objects.filter(empresa=empresa).exclude(estado=EstadoPagoTaller.ANULADO)
+        items = ItemInventario.objects.filter(empresa=empresa, activo=True)
+        usuarios = Usuario.objects.filter(empresa=empresa, is_active=True)
+        ordenes = OrdenTrabajoGlobal.objects.filter(empresa=empresa)
+        ordenes_detalle = OrdenTrabajoDetalle.objects.filter(empresa=empresa)
+        planes_detalle = PlanServicioDetalle.objects.filter(empresa=empresa)
+        presupuestos = PresupuestoCita.objects.filter(empresa=empresa)
+        solicitudes = SolicitudRepuesto.objects.filter(empresa=empresa)
+        solicitud_detalles = SolicitudRepuestoDetalle.objects.filter(empresa=empresa)
+        inicio_mes = hoy.replace(day=1)
+        serie_finanzas_mensual = self._serie_ultimos_meses(
+            {
+                "ingresos": {
+                    "queryset": pagos.filter(estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO]),
+                    "date_field": "recibido_at",
+                    "sum_field": "monto_total",
+                },
+                "compras": {
+                    "queryset": Compra.objects.filter(empresa=empresa, estado=EstadoCompra.CONFIRMADA),
+                    "date_field": "fecha_compra",
+                    "sum_field": "total",
+                },
+            },
+            months=6,
+        )
+        serie_operacion_mensual = self._serie_ultimos_meses(
+            {
+                "citas": {
+                    "queryset": citas,
+                    "date_field": "fecha_hora_inicio_programada",
+                },
+                "recepciones": {
+                    "queryset": RecepcionVehiculo.objects.filter(empresa=empresa),
+                    "date_field": "fecha_recepcion",
+                },
+            },
+            months=6,
+        )
+
+        return [
+            self._section(
+                "admin_resumen_general",
+                "Resumen general",
+                "Vista consolidada del taller, finanzas, usuarios e inventario.",
+                kpis=[
+                    self._kpi("citas_hoy", "Citas de hoy", citas.filter(fecha_hora_inicio_programada__date=hoy).count()),
+                    self._kpi("vehiculos_en_taller", "Vehículos en taller", citas.filter(estado__in=[EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO], vehiculo__isnull=False).values("vehiculo_id").distinct().count()),
+                    self._kpi("ingresos_mes", "Ingresos del mes", float(pagos.filter(recibido_at__date__gte=inicio_mes, estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO]).aggregate(total=Sum("monto_total")).get("total") or 0), format_type="currency", tone="success"),
+                    self._kpi("presupuestos_pendientes", "Presupuestos pendientes", presupuestos.filter(estado__in=[EstadoPresupuestoCita.COMUNICADO, EstadoPresupuestoCita.AJUSTADO, EstadoPresupuestoCita.APROBADO]).count(), tone="warning"),
+                    self._kpi("items_stock_bajo", "Items con stock bajo", items.filter(stock_actual__lte=models.F("stock_minimo")).count(), tone="danger"),
+                    self._kpi("usuarios_activos", "Usuarios activos", usuarios.count()),
+                    self._kpi("ordenes_abiertas", "Órdenes abiertas", ordenes.filter(estado__in=[EstadoOrdenTrabajoGlobal.ABIERTA, EstadoOrdenTrabajoGlobal.ASIGNADA, EstadoOrdenTrabajoGlobal.EN_PROCESO, EstadoOrdenTrabajoGlobal.PAUSADA]).count()),
+                    self._kpi("solicitudes_repuesto_activas", "Solicitudes activas", solicitudes.exclude(estado__in=[EstadoSolicitudRepuesto.ENTREGADA, EstadoSolicitudRepuesto.CERRADA, EstadoSolicitudRepuesto.RECHAZADA_POR_ASESOR]).count(), tone="warning"),
+                    self._kpi(
+                        "servicios_plan_activos",
+                        "Servicios de plan activos",
+                        planes_detalle.filter(
+                            estado__in=[
+                                EstadoPlanServicioDetalle.PENDIENTE,
+                                EstadoPlanServicioDetalle.PROGRAMADO,
+                                EstadoPlanServicioDetalle.EN_PROCESO,
+                                EstadoPlanServicioDetalle.RECOMENDADO,
+                            ]
+                        ).count(),
+                    ),
+                    self._kpi(
+                        "servicios_urgentes",
+                        "Servicios urgentes",
+                        planes_detalle.filter(
+                            estado__in=[
+                                EstadoPlanServicioDetalle.PENDIENTE,
+                                EstadoPlanServicioDetalle.PROGRAMADO,
+                                EstadoPlanServicioDetalle.EN_PROCESO,
+                                EstadoPlanServicioDetalle.RECOMENDADO,
+                            ],
+                            prioridad__in=["ALTA", "URGENTE"],
+                        ).count(),
+                        tone="danger",
+                    ),
+                    self._kpi(
+                        "items_repuesto_pendientes_entrega",
+                        "Items de repuesto pendientes",
+                        solicitud_detalles.exclude(
+                            estado__in=[
+                                EstadoSolicitudRepuestoDetalle.ENTREGADO,
+                                EstadoSolicitudRepuestoDetalle.CANCELADO,
+                            ]
+                        ).count(),
+                        tone="warning",
+                    ),
+                    self._kpi(
+                        "eficiencia_taller_pct",
+                        "Eficiencia del taller",
+                        round(
+                            (
+                                float(
+                                    ordenes_detalle.filter(
+                                        estado=EstadoOrdenTrabajoDetalle.FINALIZADO,
+                                        tiempo_real_min__isnull=False,
+                                    ).aggregate(total=Sum("tiempo_estandar_min")).get("total")
+                                    or 0
+                                )
+                                /
+                                max(
+                                    float(
+                                        ordenes_detalle.filter(
+                                            estado=EstadoOrdenTrabajoDetalle.FINALIZADO,
+                                            tiempo_real_min__isnull=False,
+                                        ).aggregate(total=Sum("tiempo_real_min")).get("total")
+                                        or 0
+                                    ),
+                                    1.0,
+                                )
+                            ) * 100,
+                            2,
+                        ),
+                        tone="success",
+                    ),
+                ],
+                charts=[
+                    self._chart(
+                        "admin_citas_7d",
+                        "line",
+                        "Citas programadas últimos 7 días",
+                        self._serie_ultimos_dias(citas, "fecha_hora_inicio_programada"),
+                        x_key="fecha",
+                        y_key="total",
+                    ),
+                    self._chart(
+                        "admin_citas_estado",
+                        "pie",
+                        "Distribución de estados de cita",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in citas.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "admin_plan_estado",
+                        "bar",
+                        "Estado de servicios del plan",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in planes_detalle.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "admin_ordenes_estado",
+                        "pie",
+                        "Distribucion de ordenes de trabajo",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in ordenes.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                    ),
+                    self._chart(
+                        "admin_repuestos_detalle_estado",
+                        "bar",
+                        "Estado de items de repuesto",
+                        [
+                            {"name": fila["estado"], "value": fila["total"]}
+                            for fila in solicitud_detalles.values("estado").annotate(total=Count("id")).order_by("-total")
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "admin_vehiculos_taller",
+                        "Vehículos actualmente en taller",
+                        ["Placa", "Vehículo", "Cliente", "Estado"],
+                        [
+                            {
+                                "placa": cita.vehiculo.placa if cita.vehiculo else "-",
+                                "vehiculo": f"{cita.vehiculo.marca} {cita.vehiculo.modelo}" if cita.vehiculo else "Sin vehículo",
+                                "cliente": cita.cliente.get_full_name() if cita.cliente else "-",
+                                "estado": cita.estado,
+                            }
+                            for cita in citas.filter(
+                                estado__in=[EstadoCita.EN_ESPERA_INGRESO, EstadoCita.EN_PROCESO]
+                            ).select_related("vehiculo", "cliente").order_by("fecha_hora_inicio_programada")[:8]
+                        ],
+                    ),
+                ],
+            ),
+            self._section(
+                "admin_rendimiento",
+                "Rendimiento y demanda",
+                "Vehículos, servicios y actividad económica con mayor movimiento.",
+                charts=[
+                    self._chart(
+                        "admin_top_vehiculos",
+                        "bar",
+                        "Vehículos con más ingresos al taller",
+                        [
+                            {
+                                "name": fila["vehiculo__placa"] or "Sin placa",
+                                "value": fila["total"],
+                            }
+                            for fila in citas.filter(vehiculo__isnull=False)
+                            .values("vehiculo__placa")
+                            .annotate(total=Count("id"))
+                            .order_by("-total")[:6]
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                    self._chart(
+                        "admin_ingresos_7d",
+                        "line",
+                        "Cobros últimos 7 días",
+                        self._serie_ultimos_dias(
+                            pagos.filter(estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO]),
+                            "recibido_at",
+                            sum_field="monto_total",
+                        ),
+                        x_key="fecha",
+                        y_key="total",
+                    ),
+                    self._chart(
+                        "admin_finanzas_6m",
+                        "bar",
+                        "Ingresos vs compras por mes",
+                        serie_finanzas_mensual,
+                        x_key="mes",
+                        series=[
+                            {"key": "ingresos", "label": "Ingresos"},
+                            {"key": "compras", "label": "Compras"},
+                        ],
+                    ),
+                    self._chart(
+                        "admin_operacion_6m",
+                        "line",
+                        "Citas vs recepciones por mes",
+                        serie_operacion_mensual,
+                        x_key="mes",
+                        series=[
+                            {"key": "citas", "label": "Citas"},
+                            {"key": "recepciones", "label": "Recepciones"},
+                        ],
+                    ),
+                    self._chart(
+                        "admin_top_servicios_plan",
+                        "bar",
+                        "Servicios mas frecuentes del plan",
+                        [
+                            {
+                                "name": fila["servicio_catalogo__nombre"] or "Servicio",
+                                "value": fila["total"],
+                            }
+                            for fila in planes_detalle.values("servicio_catalogo__nombre").annotate(total=Count("id")).order_by("-total")[:6]
+                        ],
+                        x_key="name",
+                        y_key="value",
+                    ),
+                ],
+                tables=[
+                    self._table(
+                        "admin_stock_critico",
+                        "Items críticos de inventario",
+                        ["Código", "Item", "Stock", "Mínimo"],
+                        [
+                            {
+                                "codigo": item.codigo,
+                                "item": item.nombre,
+                                "stock": item.stock_actual,
+                                "minimo": item.stock_minimo,
+                            }
+                            for item in items.filter(stock_actual__lte=models.F("stock_minimo")).order_by("stock_actual", "nombre")[:8]
+                        ],
+                    ),
+                    self._table(
+                        "admin_solicitudes_repuesto",
+                        "Solicitudes de repuesto activas",
+                        ["Cita", "Estado", "Solicitado por", "Fecha"],
+                        [
+                            {
+                                "cita": str(solicitud.cita_id),
+                                "estado": solicitud.estado,
+                                "solicitado_por": solicitud.solicitado_por.get_full_name() if solicitud.solicitado_por else "-",
+                                "fecha": solicitud.created_at.strftime("%Y-%m-%d %H:%M"),
+                            }
+                            for solicitud in solicitudes.exclude(
+                                estado__in=[
+                                    EstadoSolicitudRepuesto.ENTREGADA,
+                                    EstadoSolicitudRepuesto.CERRADA,
+                                    EstadoSolicitudRepuesto.RECHAZADA_POR_ASESOR,
+                                ]
+                            ).select_related("solicitado_por").order_by("-created_at")[:8]
+                        ],
+                    ),
+                ],
+            ),
+        ]
+
     @action(detail=False, methods=["get"])
     def dashboard_kpis(self, request, **kwargs):
         empresa = request.user.empresa
-        rol = request.user.rol.nombre if request.user and request.user.rol else "USUARIO"
-        hoy = datetime.now().date()
+        rol = self._rol_dashboard(request.user)
+        hoy = timezone.localdate()
 
-        data = {
-            "rol": rol,
-            "hoy": hoy.isoformat(),
-            "kpis": {},
-        }
+        sections = []
+        if rol == "ADMIN":
+            sections.extend(self._dashboard_admin(empresa, hoy))
+        elif rol == "USUARIO":
+            sections.extend(self._dashboard_usuario(request, empresa, hoy))
+        elif rol == "ASESOR DE SERVICIO":
+            sections.extend(self._dashboard_asesor(empresa, hoy))
+        elif rol in ["MECANICO", "MECÁNICO"]:
+            sections.extend(self._dashboard_mecanico(request, empresa, hoy))
+        elif rol == "ADMINISTRATIVO":
+            sections.extend(self._dashboard_administrativo(empresa, hoy))
+        elif rol == "ALMACENERO":
+            sections.extend(self._dashboard_almacenero(empresa, hoy))
+        else:
+            sections.extend(self._dashboard_usuario(request, empresa, hoy))
 
-        citas_hoy = Cita.objects.filter(empresa=empresa, fecha_hora_inicio_programada__date=hoy).count()
-        en_proceso = Cita.objects.filter(empresa=empresa, estado=EstadoCita.EN_PROCESO).count()
-        data["kpis"]["citas_hoy"] = citas_hoy
-        data["kpis"]["vehiculos_en_proceso"] = en_proceso
+        resumen = []
+        for section in sections:
+            resumen.extend(section.get("kpis", [])[:4])
 
-        if rol in ["ADMIN", "ADMINISTRATIVO"]:
-            pagos_hoy = (
-                PagoTaller.objects.filter(empresa=empresa, recibido_at__date=hoy, estado__in=[EstadoPagoTaller.RECIBIDO, EstadoPagoTaller.FACTURADO])
-                .aggregate(total=Sum("monto_total"))
-                .get("total")
-                or 0
-            )
-            pendientes_pago = PresupuestoCita.objects.filter(empresa=empresa, estado=EstadoPresupuestoCita.APROBADO).count()
-            data["kpis"]["ingresos_hoy"] = float(pagos_hoy)
-            data["kpis"]["presupuestos_pendientes_pago"] = pendientes_pago
-
-        if rol in ["ADMIN", "ALMACENERO"]:
-            stock_bajo = ItemInventario.objects.filter(empresa=empresa, activo=True, stock_actual__lte=models.F("stock_minimo")).count()
-            solicitudes_pendientes = SolicitudRepuesto.objects.filter(
-                empresa=empresa,
-                estado__in=[EstadoSolicitudRepuesto.CREADA, EstadoSolicitudRepuesto.APROBADA_POR_ASESOR, EstadoSolicitudRepuesto.EN_REVISION_ALMACEN],
-            ).count()
-            data["kpis"]["items_stock_bajo"] = stock_bajo
-            data["kpis"]["solicitudes_pendientes"] = solicitudes_pendientes
-
-        return response.Response(data)
+        return response.Response(
+            {
+                "rol": rol,
+                "hoy": hoy.isoformat(),
+                "kpis": self._flatten_kpis(sections),
+                "summary": resumen[:8],
+                "sections": sections,
+            }
+        )
 
     @action(detail=False, methods=["get"])
     def usuarios(self, request, **kwargs):

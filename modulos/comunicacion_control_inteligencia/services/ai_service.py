@@ -336,12 +336,12 @@ Contexto Específico:
 {ctx_str}
 
 ACCIONES PERMITIDAS:
-`json
+```json
 [
   {{"type": "CREAR_CATEGORIA_INVENTARIO", "parameters": {{"nombre": "str", "descripcion": "str"}}}},
   {{"type": "CREAR_ITEM_INVENTARIO", "parameters": {{"categoria_id": "str", "codigo": "str", "nombre": "str", "descripcion": "str", "tipo_item": "str", "unidad_medida": "str", "stock_actual": "int", "stock_minimo": "int", "costo_promedio": "float", "precio_venta": "float"}}}}
 ]
-`
+```
 
 REGLAS ESPECÍFICAS DEL MÓDULO:
 - En CREAR_ITEM_INVENTARIO, NUNCA inventes la categoría. Extrae el UUID de la categoría si el usuario menciona una de la lista. Si no menciona, muéstrale las categorías disponibles y pregúntale.
@@ -354,11 +354,11 @@ REGLAS ESPECÍFICAS DEL MÓDULO:
 ESTÁS EN EL MÓDULO: PROVEEDORES
 
 ACCIONES PERMITIDAS:
-`json
+```json
 [
   {{"type": "CREAR_PROVEEDOR", "parameters": {{"nombre": "str", "telefono": "str", "email": "str", "direccion": "str", "contacto": "str"}}}}
 ]
-`
+```
 """
 
     def _get_compras_prompt(self) -> str:
@@ -366,11 +366,11 @@ ACCIONES PERMITIDAS:
 ESTÁS EN EL MÓDULO: COMPRAS
 
 ACCIONES PERMITIDAS:
-`json
+```json
 [
   {{"type": "AGREGAR_ITEM_COMPRA", "parameters": {{"cantidad": "int", "costo_unitario": "float"}}}}
 ]
-`
+```
 
 REGLAS ESPECÍFICAS DEL MÓDULO:
 - MUY IMPORTANTE: Cuando el usuario quiera añadir un ítem a la compra, DEBES PREGUNTAR OBLIGATORIAMENTE la cantidad y el costo unitario ANTES de ejecutar la acción.
@@ -390,12 +390,12 @@ Contexto Específico:
 {ctx_str}
 
 ACCIONES PERMITIDAS:
-`json
+```json
 [
   {{"type": "CREAR_USUARIO", "parameters": {{"nombres": "str", "apellidos": "str", "email": "str", "contrasena": "str", "telefono": "str"}}}},
   {{"type": "CAMBIAR_ROL_USUARIO", "parameters": {{"usuario_id": "str", "nuevo_rol": "str"}}}}
 ]
-`
+```
 
 REGLAS ESPECÍFICAS DEL MÓDULO:
 - En CAMBIAR_ROL_USUARIO, extrae el UUID del usuario de la lista inyectada y el ID/Nombre del rol de la lista de Roles.
@@ -406,11 +406,11 @@ REGLAS ESPECÍFICAS DEL MÓDULO:
 ESTÁS EN EL MÓDULO: GESTIÓN DE BACKUPS
 
 ACCIONES PERMITIDAS:
-`json
+```json
 [
   {{"type": "CONFIGURAR_BACKUP", "parameters": {{"activo": "bool", "frecuencia": "str", "hora_ejecucion": "str", "compensar_pendientes": "bool"}}}}
 ]
-`
+```
 
 REGLAS ESPECÍFICAS DEL MÓDULO:
 - 'frecuencia' SOLO puede ser: "DIARIO", "SEMANAL" o "MENSUAL".

@@ -270,6 +270,50 @@ class VannaAutomotrizService(VannaBase):
                 "AND p.estado != 'ANULADO' "
                 "ORDER BY COALESCE(p.fecha_pago, p.created_at) DESC"
             )
+        if (
+            ("ingresos del mes" in q)
+            or ("total de ingresos" in q and "este mes" in q)
+            or ("ingresos agrupado por dia" in q)
+            or ("ingresos agrupados por dia" in q)
+            or ("total facturado por dia" in q)
+        ):
+            return (
+                "SELECT "
+                "DATE(COALESCE(p.fecha_pago, f.fecha_emision, p.created_at)) AS fecha, "
+                "SUM(COALESCE(f.total, p.monto_pagado, p.monto_total, 0)) AS ingresos "
+                "FROM pagos_taller p "
+                "LEFT JOIN facturas f ON f.pago_taller_id = p.id "
+                f"WHERE p.empresa_id = '{self.tenant_id}' "
+                "AND p.estado != 'ANULADO' "
+                "AND COALESCE(p.fecha_pago, f.fecha_emision, p.created_at) >= date_trunc('month', CURRENT_DATE) "
+                "AND COALESCE(p.fecha_pago, f.fecha_emision, p.created_at) < (date_trunc('month', CURRENT_DATE) + interval '1 month') "
+                "GROUP BY DATE(COALESCE(p.fecha_pago, f.fecha_emision, p.created_at)) "
+                "ORDER BY fecha ASC"
+            )
+        if (
+            ("historial general de compras" in q)
+            or ("listado general de compras" in q)
+            or ("ver compras" in q)
+            or ("listar compras" in q)
+            or ("historial de compras" in q)
+            or ("compras por proveedor" in q)
+        ):
+            return (
+                "SELECT "
+                "c.numero_documento, "
+                "c.fecha_compra, "
+                "c.estado, "
+                "COALESCE(p.nombre, 'SIN_PROVEEDOR') AS proveedor, "
+                "c.subtotal, "
+                "c.total, "
+                "COALESCE(u.nombres || ' ' || u.apellidos, '-') AS registrado_por, "
+                "COALESCE(c.observaciones, '-') AS observaciones "
+                "FROM compras c "
+                "LEFT JOIN proveedores p ON p.id = c.proveedor_id "
+                "LEFT JOIN usuarios u ON u.id = c.registrado_por_id "
+                f"WHERE c.empresa_id = '{self.tenant_id}' "
+                "ORDER BY c.fecha_compra DESC, c.created_at DESC"
+            )
 
         if ("plan de vehiculo" in q or "plan del vehiculo" in q) and "placa" in q:
             m = re.search(r"placa\s+([a-zA-Z0-9\-]+)", user_text, flags=re.IGNORECASE)
@@ -1154,6 +1198,20 @@ class VannaAutomotrizService(VannaBase):
             fixed_sql,
             flags=re.IGNORECASE,
         )
+        # `facturas.pago_taller_id` apunta al UUID real de `pagos_taller.id`,
+        # no al id externo almacenado en `id_pago_proveedor`.
+        fixed_sql = re.sub(
+            r"JOIN\s+facturas\s+(f|fa)\s+ON\s+(pt|p)\.id_pago_proveedor\s*=\s*\1\.pago_taller_id",
+            r"JOIN facturas \1 ON \1.pago_taller_id = \2.id",
+            fixed_sql,
+            flags=re.IGNORECASE,
+        )
+        fixed_sql = re.sub(
+            r"JOIN\s+facturas\s+(f|fa)\s+ON\s+\1\.pago_taller_id\s*=\s*(pt|p)\.id_pago_proveedor",
+            r"JOIN facturas \1 ON \1.pago_taller_id = \2.id",
+            fixed_sql,
+            flags=re.IGNORECASE,
+        )
         return fixed_sql
 
     def repair_sql_with_error(self, sql: str, error_message: str) -> str:
@@ -1229,6 +1287,47 @@ class VannaAutomotrizService(VannaBase):
                 "JOIN citas c ON p.cita_id = c.id JOIN vehiculos v ON c.vehiculo_id = v.id",
                 fixed_sql,
                 flags=re.IGNORECASE,
+            )
+
+        # Caso: se unio facturas con el id externo del proveedor en lugar del PK del pago.
+        if (
+            "operator does not exist: character varying = uuid" in err
+            and "pago_taller_id" in fixed_sql.lower()
+            and "id_pago_proveedor" in fixed_sql.lower()
+        ):
+            fixed_sql = re.sub(
+                r"JOIN\s+facturas\s+(f|fa)\s+ON\s+(pt|p)\.id_pago_proveedor\s*=\s*\1\.pago_taller_id",
+                r"JOIN facturas \1 ON \1.pago_taller_id = \2.id",
+                fixed_sql,
+                flags=re.IGNORECASE,
+            )
+            fixed_sql = re.sub(
+                r"JOIN\s+facturas\s+(f|fa)\s+ON\s+\1\.pago_taller_id\s*=\s*(pt|p)\.id_pago_proveedor",
+                r"JOIN facturas \1 ON \1.pago_taller_id = \2.id",
+                fixed_sql,
+                flags=re.IGNORECASE,
+            )
+
+        # Caso: el LLM trató `compras c` como si fuera una tabla de citas y le unió vehículos.
+        if (
+            "column c.vehiculo_id does not exist" in err
+            and "from compras c" in fixed_sql.lower()
+        ):
+            fixed_sql = (
+                "SELECT "
+                "c.numero_documento, "
+                "c.fecha_compra, "
+                "c.estado, "
+                "COALESCE(p.nombre, 'SIN_PROVEEDOR') AS proveedor, "
+                "c.subtotal, "
+                "c.total, "
+                "COALESCE(u.nombres || ' ' || u.apellidos, '-') AS registrado_por, "
+                "COALESCE(c.observaciones, '-') AS observaciones "
+                "FROM compras c "
+                "LEFT JOIN proveedores p ON p.id = c.proveedor_id "
+                "LEFT JOIN usuarios u ON u.id = c.registrado_por_id "
+                f"WHERE c.empresa_id = '{self.tenant_id}' "
+                "ORDER BY c.fecha_compra DESC, c.created_at DESC"
             )
 
         return fixed_sql

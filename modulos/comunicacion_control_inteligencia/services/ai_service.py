@@ -459,4 +459,4 @@ IMPORTANTE:
 - En el campo 'message', pide amigablemente los parámetros que faltan.
 - Si el usuario ha dado todos los parámetros, envía la acción con status="PENDIENTE" y pregunta si desea proceder/guardar.
 - Solo envía status="EJECUTADA" cuando el usuario haya dicho "sí", "guardar", "procede" después de ver todos los datos.
-\"\"\"
+"""

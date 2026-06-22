@@ -23,7 +23,7 @@ from modulos.comunicacion_control_inteligencia.serializers.ia import (
 )
 from modulos.vehiculos_servicios_plan_citas.models import Vehiculo, ServicioCatalogo, EspacioTrabajo
 from modulos.administracion_acceso_configuracion.models import Usuario, Rol
-from modulos.inventario_proveedores_administracion.models import CategoriaInventario
+from modulos.inventario_proveedores_administracion.models import CategoriaInventario, ItemInventario, PagoTaller
 from modulos.comunicacion_control_inteligencia.services.ai_service import AIService
 
 class IAViewSet(viewsets.ModelViewSet):
@@ -140,6 +140,8 @@ class IAViewSet(viewsets.ModelViewSet):
                 intent_preview = "USUARIOS"
             elif accion_pendiente.accion in ["CONFIGURAR_BACKUP"]:
                 intent_preview = "BACKUP"
+            elif accion_pendiente.accion in ["AGREGAR_ITEM_VENTA", "EMITIR_FACTURA", "CONSULTAR_CAJA"]:
+                intent_preview = "FINANZAS_VENTAS"
 
         owners_list = []
         servicios_list = []
@@ -147,6 +149,8 @@ class IAViewSet(viewsets.ModelViewSet):
         categorias_list = []
         usuarios_list = []
         roles_list = []
+        items_inventario_list = []
+        pagos_disponibles_list = []
 
         if intent_preview in ("VEHICULOS_PLANES",):
             propietarios = Usuario.objects.filter(empresa=request.user.empresa).values('id', 'nombres', 'apellidos')
@@ -160,15 +164,29 @@ class IAViewSet(viewsets.ModelViewSet):
             espacios = EspacioTrabajo.objects.filter(empresa=request.user.empresa, activo=True).values('id', 'nombre', 'codigo')
             espacios_list = [f"{e['nombre']} [{e['codigo']}] (ID: {e['id']})" for e in espacios]
 
-        if intent_preview in ("INVENTARIO",):
+        if intent_preview in ("INVENTARIO", "FINANZAS_VENTAS", "COMPRAS"):
             categorias = CategoriaInventario.objects.filter(empresa=request.user.empresa, activo=True).values('id', 'nombre')
             categorias_list = [f"{c['nombre']} (ID: {c['id']})" for c in categorias]
+            
+            items = ItemInventario.objects.filter(empresa=request.user.empresa, activo=True).values('id', 'codigo', 'nombre', 'precio_venta', 'stock_actual')
+            items_inventario_list = [f"[{i['codigo']}] {i['nombre']} - Stock: {i['stock_actual']} - Bs {i['precio_venta']} (ID: {i['id']})" for i in items]
 
         if intent_preview in ("USUARIOS",):
             usuarios = Usuario.objects.filter(empresa=request.user.empresa, is_active=True).values('id', 'nombres', 'apellidos')
             usuarios_list = [f"{u['nombres']} {u['apellidos']} (ID: {u['id']})" for u in usuarios]
             roles = Rol.objects.all().values('id', 'nombre')
             roles_list = [f"{r['nombre']} (ID: {r['id']})" for r in roles]
+
+        if intent_preview in ("FINANZAS_VENTAS",):
+            # Obtener pagos sin factura
+            from django.db.models import Q
+            pagos = PagoTaller.objects.filter(
+                empresa=request.user.empresa, 
+                estado__in=['RECIBIDO', 'CONFIRMADO']
+            ).filter(
+                Q(factura__isnull=True)
+            ).values('id', 'codigo_pago', 'monto_total', 'moneda', 'tipo_origen')
+            pagos_disponibles_list = [f"Pago {p['codigo_pago'] or p['id']} ({p['tipo_origen']}) - {p['monto_total']} {p['moneda']} (ID: {p['id']})" for p in pagos]
 
         contexto = {
             "tenant_name": request.user.empresa.nombre,
@@ -180,6 +198,8 @@ class IAViewSet(viewsets.ModelViewSet):
             "categorias_list": categorias_list,
             "usuarios_list": usuarios_list,
             "roles_list": roles_list,
+            "items_inventario_list": items_inventario_list,
+            "pagos_disponibles_list": pagos_disponibles_list,
             "current_form_data": accion_pendiente.parametros if accion_pendiente else {}
         }
         

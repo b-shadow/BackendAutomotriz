@@ -56,6 +56,7 @@ class AIService:
 - COMPRAS: Compras de insumos o repuestos.
 - USUARIOS: GestiÃ³n de usuarios del sistema, aÃ±adir usuario, cambiar roles.
 - BACKUP: Configuraciones de copias de seguridad de la base de datos.
+- FINANZAS_VENTAS: Ventas presenciales en mostrador, emisiÃ³n de facturas o recibos, consulta de caja y movimientos financieros.
 - GENERAL: Saludos, preguntas generales, sin acciÃ³n especÃ­fica.
 
 ConversaciÃ³n reciente:
@@ -206,6 +207,8 @@ REGLAS GENERALES ESTRICTAS:
             prompt += self._get_usuarios_prompt(context)
         elif intent == "BACKUP":
             prompt += self._get_backup_prompt()
+        elif intent == "FINANZAS_VENTAS":
+            prompt += self._get_finanzas_ventas_prompt()
         else:
             prompt += self._get_general_prompt()
 
@@ -429,3 +432,31 @@ No se detectÃ³ una intenciÃ³n clara de modificar un mÃ³dulo especÃ­fico.
 Responde amablemente a la consulta del usuario, sugiÃ©rele acciones que puede realizar (ej. "Puedo ayudarte a gestionar vehÃ­culos, agendar citas o descargar reportes").
 No devuelvas ninguna acciÃ³n tÃ©cnica ('action') a menos que estÃ©s absolutamente seguro.
 """
+
+    def _get_finanzas_ventas_prompt(self) -> str:
+        return f\"\"\"
+ESTÁS EN EL MÓDULO: FINANZAS Y VENTAS
+
+Aquí puedes registrar ventas presenciales de mostrador, emitir facturas/recibos a partir de pagos, y consultar el estado de la caja registradora.
+
+ACCIONES PERMITIDAS Y SUS PARÁMETROS:
+
+1. AGREGAR_ITEM_VENTA: Úsala para agregar un producto al carrito de venta presencial en mostrador.
+   Parámetros:
+   - "itemId": Nombre o código del ítem a agregar.
+   - "cantidad": Cantidad a vender.
+
+2. EMITIR_FACTURA: Úsala para emitir una factura o recibo.
+   Parámetros:
+   - "pago_taller": El pago asociado a esta factura.
+   - "numero": (Opcional) Número del comprobante.
+   - "nit_razon_social": NIT o Razón social del cliente a facturar.
+
+3. CONSULTAR_CAJA: Úsala cuando el usuario quiera saber el saldo actual, ingresos o egresos de su caja activa. (Solo informa, no requiere parámetros específicos).
+
+IMPORTANTE:
+- Cuando el usuario indique una acción, si faltan parámetros, envía la acción con status="PENDIENTE" y los campos que conozcas, llenando con "MANUAL" los faltantes.
+- En el campo 'message', pide amigablemente los parámetros que faltan.
+- Si el usuario ha dado todos los parámetros, envía la acción con status="PENDIENTE" y pregunta si desea proceder/guardar.
+- Solo envía status="EJECUTADA" cuando el usuario haya dicho "sí", "guardar", "procede" después de ver todos los datos.
+\"\"\"
